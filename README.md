@@ -21,8 +21,8 @@ make -j"$(nproc)" config=release optkit_dynamic
 popd
 
 premake5 gmake
-make -C build config=debug orbit
-./bin/Debug/orbit
+make -C build config=release orbit
+./bin/Release/orbit
 make -C build config=test orbit_test
 ./bin/Test/orbit_test
 ```
