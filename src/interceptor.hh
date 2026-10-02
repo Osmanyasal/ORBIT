@@ -80,16 +80,12 @@ namespace orbit
 
 }
 
-#if defined(ORBIT_OPENMP_GCC)
-#include "interceptor_gcc.hh"
-#elif defined(ORBIT_OPENMP_INTEL)
+#if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER)
 #include "interceptor_intel.hh"
-#elif defined(ORBIT_OPENMP_CLANG)
+#elif defined(__clang__)
 #include "interceptor_clang.hh"
-#elif defined(ORBIT_OPENMP_ALL)
+#elif defined(__GNUC__)
 #include "interceptor_gcc.hh"
-#include "interceptor_intel.hh"
-#include "interceptor_clang.hh"
 #else
 #include "interceptor_gcc.hh"
 #endif
