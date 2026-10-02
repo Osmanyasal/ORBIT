@@ -29,11 +29,29 @@ namespace orbit
               region{reinterpret_cast<void (*)()>(function), caller, entry, static_cast<int>(threads), chunk, omp_sched_static, {}},
               split(legacy)
         {
-            char buf[32];
-            std::snprintf(buf, sizeof(buf), "%p", caller);
-            region.name = buf;
-            region.threads = !threads ? omp_get_max_threads() : static_cast<int>(threads);
+            Dl_info info;
+            if (dladdr(caller, &info) && info.dli_fbase)
+            {
+                uintptr_t offset = reinterpret_cast<uintptr_t>(caller) -
+                                   reinterpret_cast<uintptr_t>(info.dli_fbase);
+                const char *fname = info.dli_fname ? info.dli_fname : "unknown";
+                const char *slash = std::strrchr(fname, '/');
+                if (slash)
+                {
+                    fname = slash + 1;
+                }
+                char buf[128];
+                std::snprintf(buf, sizeof(buf), "%s+0x%lx", fname, offset);
+                region.name = buf;
+            }
+            else
+            {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%p", caller);
+                region.name = buf;
+            }
 
+            region.threads = !threads ? omp_get_max_threads() : static_cast<int>(threads);
             region_begin(region);
             active_region = this;
         }
