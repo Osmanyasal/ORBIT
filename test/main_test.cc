@@ -3,7 +3,7 @@
 
 int main() {
     int parallel_threads = 0;
-    #pragma omp parallel num_threads(4)
+    #pragma omp parallel
     {
         #pragma omp single
         parallel_threads = omp_get_num_threads();
@@ -12,7 +12,7 @@ int main() {
 
     int loop_threads = 0;
     int sum = 0;
-    #pragma omp parallel for num_threads(4) schedule(dynamic, 2) reduction(+:sum)
+    #pragma omp parallel for reduction(+:sum)
     for (int index = 0; index < 16; ++index) {
         if (index == 0) {
             loop_threads = omp_get_num_threads();
@@ -25,7 +25,7 @@ int main() {
     int runtime_sum = 0;
     omp_sched_t runtime_schedule = omp_sched_static;
     int runtime_chunk = 0;
-    #pragma omp parallel for num_threads(4) schedule(runtime) reduction(+:runtime_sum)
+    #pragma omp parallel for reduction(+:runtime_sum) schedule(runtime)
     for (int index = 0; index < 16; ++index) {
         if (index == 0) {
             runtime_threads = omp_get_num_threads();

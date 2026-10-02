@@ -136,37 +136,23 @@ end
 
 project "optimizer"
     kind "SharedLib"
-    language "C++"
-    cppdialect "C++17"
     targetname "optimizer"
-    targetdir "bin/%{cfg.buildcfg}"
-    objdir "bin/obj/%{prj.name}/%{cfg.buildcfg}"
-    files { "src/optimizer.cc", "src/interceptor*.hh" }
-    links { "dl", "pthread" }
+    base_project_setup()
+    files { "src/optimizer.cc", "src/interceptor*.hh", "src/region.hh" }
     interceptor_backend_setup()
-    warnings "Extra"
-    filter "configurations:Release"
-        optimize "Speed"
-    filter "configurations:Debug or Test"
-        symbols "On"
-    filter {}
 
 project "snapshot"
     kind "SharedLib"
-    language "C++"
-    cppdialect "C++17"
     targetname "snapshot"
-    targetdir "bin/%{cfg.buildcfg}"
-    objdir "bin/obj/%{prj.name}/%{cfg.buildcfg}"
-    files { "src/snapshot.cc", "src/interceptor*.hh" }
-    links { "dl", "pthread" }
+    base_project_setup()
+    files { "src/snapshot.cc", "src/interceptor*.hh", "src/region.hh" }
     interceptor_backend_setup()
-    warnings "Extra"
-    filter "configurations:Release"
-        optimize "Speed"
-    filter "configurations:Debug or Test"
-        symbols "On"
-    filter {}
+
+project "analiser"
+    kind "ConsoleApp"
+    targetname "analiser"
+    base_project_setup()
+    files { "src/analiser.cc", "src/region.hh" }
 
 project "orbit_test"
     kind "ConsoleApp"

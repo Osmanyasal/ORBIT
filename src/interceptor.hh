@@ -3,60 +3,62 @@
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <omp.h>
+#include "region.hh"
 
-namespace orbit {
+namespace orbit
+{
+    static void region_begin(Region &region);
+    static void region_end(const Region &region);
 
-struct Region {
-    void (*function)();
-    void* caller;
-    const char* entry;
-    unsigned threads;
-    long chunk;
-};
+    class RegionScope;
+    inline thread_local RegionScope *active_region = nullptr;
 
-static void region_begin(Region& region);
-static void region_end(const Region& region);
+    class RegionScope
+    {
+        RegionScope *parent;
 
-class RegionScope;
-inline thread_local RegionScope* active_region = nullptr;
-
-class RegionScope {
-    RegionScope* parent;
-
-public:
-    Region region;
-    bool split;
+    public:
+        Region region;
+        bool split;
 
         template <typename Function>
-        RegionScope(Function function, void* caller, const char* entry,
-                unsigned threads, long chunk = 0, bool legacy = false)
-                : parent(active_region), region {reinterpret_cast<void (*)()>(function), caller, entry, threads, chunk},
-                    split(legacy) {
-        region_begin(region);
-        if (threads == 1) {
-            region.threads = 1;
+        RegionScope(Function function, void *caller, const char *entry,
+                    unsigned threads, long chunk = 0, bool legacy = false)
+            : parent(active_region), 
+              region{reinterpret_cast<void (*)()>(function), caller, entry, static_cast<int>(threads), chunk, omp_sched_static, {}},
+              split(legacy)
+        {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%p", caller);
+            region.name = buf;
+            region.threads = !threads ? omp_get_max_threads() : static_cast<int>(threads);
+
+            region_begin(region);
+            active_region = this;
         }
-        active_region = this;
-    }
 
-    ~RegionScope() {
-        active_region = parent;
-        region_end(region);
-    }
+        ~RegionScope()
+        {
+            active_region = parent;
+            region_end(region);
+        }
 
-    RegionScope(const RegionScope&) = delete;
-    RegionScope& operator=(const RegionScope&) = delete;
-};
+        RegionScope(const RegionScope &) = delete;
+        RegionScope &operator=(const RegionScope &) = delete;
+    };
 
-template <typename Function>
-inline Function resolve(const char* name) {
-    void* address = dlsym(RTLD_NEXT, name);
-    if (!address) {
-        std::fprintf(stderr, "ORBIT: cannot resolve OpenMP symbol: %s\n", name);
-        std::_Exit(EXIT_FAILURE);
+    template <typename Function>
+    inline Function resolve(const char *name)
+    {
+        void *address = dlsym(RTLD_NEXT, name);
+        if (!address)
+        {
+            std::fprintf(stderr, "ORBIT: cannot resolve OpenMP symbol: %s\n", name);
+            std::_Exit(EXIT_FAILURE);
+        }
+        return reinterpret_cast<Function>(address);
     }
-    return reinterpret_cast<Function>(address);
-}
 
 }
 
@@ -66,8 +68,10 @@ inline Function resolve(const char* name) {
 #include "interceptor_intel.hh"
 #elif defined(ORBIT_OPENMP_CLANG)
 #include "interceptor_clang.hh"
-#else
+#elif defined(ORBIT_OPENMP_ALL)
 #include "interceptor_gcc.hh"
 #include "interceptor_intel.hh"
 #include "interceptor_clang.hh"
+#else
+#include "interceptor_gcc.hh"
 #endif
