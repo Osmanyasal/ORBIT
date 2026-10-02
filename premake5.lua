@@ -8,10 +8,28 @@ newaction {
     end
 }
 
+newoption {
+    trigger = "openmp-backend",
+    value = "BACKEND",
+    description = "OpenMP interceptor ABI (default: gcc)",
+    allowed = {
+        { "all", "Select hooks through the target application's runtime symbols" },
+        { "gcc", "GCC libgomp hooks only" },
+        { "intel", "Intel libiomp5 hooks only" },
+        { "clang", "Clang libomp hooks only" }
+    }
+}
+
+newoption {
+    trigger = "libffi-root",
+    value = "PATH",
+    description = "Optional libffi installation prefix"
+}
+
 workspace "ORBIT"
     configurations { "Debug", "Release", "Test" }
     location "build"
-    startproject "orbit"
+    startproject "snapshot"
 
 local optkit_root = "lib/OPTKIT"
 local optkit_spdlog_root = optkit_root .. "/lib/spdlog"
@@ -97,26 +115,68 @@ local function base_project_setup()
     filter {}
 end
 
-project "orbit_static"
-    kind "StaticLib"
-    targetname "orbit"
-    base_project_setup()
-    files { "src/orbit.cc", "src/orbit.hh" }
+local function interceptor_backend_setup()
+    local backend = _OPTIONS["openmp-backend"] or "gcc"
+    if backend ~= "all" then
+        defines { "ORBIT_OPENMP_" .. string.upper(backend) }
+    end
+    if backend ~= "gcc" then
+        links { "ffi" }
+        local ffi_root = _OPTIONS["libffi-root"]
+        if ffi_root then
+            includedirs { ffi_root .. "/include" }
+            libdirs { ffi_root .. "/lib", ffi_root .. "/lib64" }
+            linkoptions {
+                "-Wl,-rpath," .. path.getabsolute(ffi_root .. "/lib"),
+                "-Wl,-rpath," .. path.getabsolute(ffi_root .. "/lib64")
+            }
+        end
+    end
+end
 
-project "orbit"
-    kind "ConsoleApp"
-    base_project_setup()
-    files { "src/main.cc" }
-    links { "orbit_static" }
+project "optimizer"
+    kind "SharedLib"
+    language "C++"
+    cppdialect "C++17"
+    targetname "optimizer"
+    targetdir "bin/%{cfg.buildcfg}"
+    objdir "bin/obj/%{prj.name}/%{cfg.buildcfg}"
+    files { "src/optimizer.cc", "src/interceptor*.hh" }
+    links { "dl", "pthread" }
+    interceptor_backend_setup()
+    warnings "Extra"
+    filter "configurations:Release"
+        optimize "Speed"
+    filter "configurations:Debug or Test"
+        symbols "On"
+    filter {}
+
+project "snapshot"
+    kind "SharedLib"
+    language "C++"
+    cppdialect "C++17"
+    targetname "snapshot"
+    targetdir "bin/%{cfg.buildcfg}"
+    objdir "bin/obj/%{prj.name}/%{cfg.buildcfg}"
+    files { "src/snapshot.cc", "src/interceptor*.hh" }
+    links { "dl", "pthread" }
+    interceptor_backend_setup()
+    warnings "Extra"
+    filter "configurations:Release"
+        optimize "Speed"
+    filter "configurations:Debug or Test"
+        symbols "On"
+    filter {}
 
 project "orbit_test"
     kind "ConsoleApp"
-    base_project_setup()
-    files { "test/**.cc" }
-    links { "orbit_static" }
-
-project "orbit_example"
-    kind "ConsoleApp"
-    base_project_setup()
-    files { "examples/**.cc" }
-    links { "orbit_static" }
+    language "C++"
+    cppdialect "C++17"
+    targetdir "bin/%{cfg.buildcfg}"
+    objdir "bin/obj/%{prj.name}/%{cfg.buildcfg}"
+    files { "test/main_test.cc" }
+    includedirs { "src" }
+    links { "dl" }
+    warnings "Extra"
+    buildoptions { "-fopenmp" }
+    linkoptions { "-fopenmp" }
