@@ -45,12 +45,12 @@ namespace orbit
     class Region
     {
     public:
-        void (*function)();
-        void *caller;
-        const char *entry;
-        int threads;
-        long chunk;
-        omp_sched_t sched;
+        void (*function)() = nullptr;
+        void *caller = nullptr;
+        const char *entry = "";
+        int threads = 0;
+        long chunk = 0;
+        omp_sched_t sched = static_cast<omp_sched_t>(0);
         std::string name;
 
         std::string to_json() const
@@ -85,20 +85,9 @@ namespace orbit
         }
     };
 
-    struct RegionConfig
+    inline std::unordered_map<std::string, Region> read_region_configs(const std::string &filepath)
     {
-        std::string name;
-        std::string caller;
-        std::string function;
-        std::string entry;
-        int threads = 0;
-        long chunk = 0;
-        omp_sched_t sched = static_cast<omp_sched_t>(0);
-    };
-
-    inline std::unordered_map<std::string, RegionConfig> read_region_configs(const std::string &filepath)
-    {
-        std::unordered_map<std::string, RegionConfig> configs;
+        std::unordered_map<std::string, Region> configs;
         std::ifstream in(filepath);
         if (!in.is_open())
         {
@@ -106,7 +95,7 @@ namespace orbit
         }
 
         std::string line;
-        RegionConfig current;
+        Region current;
         bool in_object = false;
 
         auto trim = [](const std::string &s) -> std::string
@@ -126,7 +115,7 @@ namespace orbit
 
             if (trimmed == "{" || trimmed.rfind('{', 0) == 0)
             {
-                current = RegionConfig{};
+                current = Region{};
                 in_object = true;
                 continue;
             }
@@ -167,18 +156,32 @@ namespace orbit
             if (key == "name")
                 current.name = str_val;
             else if (key == "caller")
-                current.caller = str_val;
+            {
+                try
+                {
+                    current.caller = reinterpret_cast<void *>(std::stoull(str_val, nullptr, 16));
+                }
+                catch (...)
+                {
+                }
+            }
             else if (key == "function")
-                current.function = str_val;
-            else if (key == "entry")
-                current.entry = str_val;
+            {
+                try
+                {
+                    current.function = reinterpret_cast<void (*)()>(std::stoull(str_val, nullptr, 16));
+                }
+                catch (...)
+                {
+                }
+            }
             else if (key == "sched")
                 current.sched = string_to_sched(str_val);
             else if (key == "threads")
             {
                 try
                 {
-                    current.threads = static_cast<unsigned>(std::stoul(val));
+                    current.threads = static_cast<int>(std::stol(val));
                 }
                 catch (...)
                 {
