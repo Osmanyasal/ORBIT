@@ -1,9 +1,14 @@
 #pragma once
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
+#include <memory>
 #include <omp.h>
+#include <string>
+#include "optkit.hh"
 #include "region.hh"
 
 namespace orbit
@@ -11,49 +16,62 @@ namespace orbit
     static void region_begin(Region &region);
     static void region_end(const Region &region);
 
+    namespace detail
+    {
+        // "<binary>+0x<offset>" when the caller is inside a loaded object, raw address otherwise.
+        inline std::string describe_caller(void *caller)
+        {
+            char buf[128];
+            Dl_info info{};
+            if (dladdr(caller, &info) && info.dli_fbase)
+            {
+                const char *fname = info.dli_fname ? info.dli_fname : "unknown";
+                if (const char *slash = std::strrchr(fname, '/'))
+                {
+                    fname = slash + 1;
+                }
+                const auto offset = reinterpret_cast<std::uintptr_t>(caller) -
+                                    reinterpret_cast<std::uintptr_t>(info.dli_fbase);
+                std::snprintf(buf, sizeof(buf), "%s+0x%lx", fname, static_cast<unsigned long>(offset));
+            }
+            else
+            {
+                std::snprintf(buf, sizeof(buf), "%p", caller);
+            }
+            return buf;
+        }
+    }
+
     class RegionScope;
     inline thread_local RegionScope *active_region = nullptr;
 
+    // Brackets one intercepted parallel region: region_begin on construction, region_end on destruction.
+    // Scopes nest per thread through active_region; `split` marks heap-allocated scopes whose end is
+    // signalled by a separate runtime call (legacy GOMP_parallel_start/end, serialized KMP regions).
     class RegionScope
     {
-        RegionScope *parent;
-
     public:
         Region region;
         bool split;
 
+        RegionScope(void (*function)(), void *caller, const char *entry,
+                    unsigned threads, long chunk = 0, bool legacy = false)
+            : region{function, caller, entry,
+                     threads ? static_cast<int>(threads) : omp_get_max_threads(),
+                     chunk, omp_sched_static, detail::describe_caller(caller)},
+              split(legacy),
+              parent(active_region)
+        {
+            region_begin(region);
+            active_region = this;
+        }
+
+        // Any other outlined-function signature (GOMP, KMP microtask) is erased to void (*)().
         template <typename Function>
         RegionScope(Function function, void *caller, const char *entry,
                     unsigned threads, long chunk = 0, bool legacy = false)
-            : parent(active_region), 
-              region{reinterpret_cast<void (*)()>(function), caller, entry, static_cast<int>(threads), chunk, omp_sched_static, {}},
-              split(legacy)
+            : RegionScope(reinterpret_cast<void (*)()>(function), caller, entry, threads, chunk, legacy)
         {
-            Dl_info info;
-            if (dladdr(caller, &info) && info.dli_fbase)
-            {
-                uintptr_t offset = reinterpret_cast<uintptr_t>(caller) -
-                                   reinterpret_cast<uintptr_t>(info.dli_fbase);
-                const char *fname = info.dli_fname ? info.dli_fname : "unknown";
-                const char *slash = std::strrchr(fname, '/');
-                if (slash)
-                {
-                    fname = slash + 1;
-                }
-                char buf[128];
-                std::snprintf(buf, sizeof(buf), "%s+0x%lx", fname, offset);
-                region.name = buf;
-            }
-            else
-            {
-                char buf[32];
-                std::snprintf(buf, sizeof(buf), "%p", caller);
-                region.name = buf;
-            }
-
-            region.threads = !threads ? omp_get_max_threads() : static_cast<int>(threads);
-            region_begin(region);
-            active_region = this;
         }
 
         ~RegionScope()
@@ -64,6 +82,11 @@ namespace orbit
 
         RegionScope(const RegionScope &) = delete;
         RegionScope &operator=(const RegionScope &) = delete;
+
+    private:
+        RegionScope *parent;
+        std::unique_ptr<optkit::pmu::cpu::perf::BlockProfiler> cpu_event_profiler;
+        std::unique_ptr<optkit::energy::rapl::Profiler> cpu_energy_profiler;
     };
 
     template <typename Function>

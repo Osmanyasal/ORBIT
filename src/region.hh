@@ -46,7 +46,7 @@ namespace orbit
     {
     public:
         void (*function)() = nullptr;
-        void *caller = nullptr;
+        void *caller = nullptr; // caller and name can be different due to ASLR
         const char *entry = "";
         int threads = 0;
         long chunk = 0;
