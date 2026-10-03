@@ -6,6 +6,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <memory>
+#include <mutex>
 #include <omp.h>
 #include <string>
 #include "optkit.hh"
@@ -18,7 +19,23 @@ namespace orbit
 
     namespace detail
     {
-        // "<binary>+0x<offset>" when the caller is inside a loaded object, raw address otherwise.
+        // Process-wide OPTKIT instance, created on first use and destroyed at exit.
+        // It initialises the logger and PMU query state the profilers rely on.
+        inline std::unique_ptr<optkit::OPTKIT> &optkit_instance()
+        {
+            static std::unique_ptr<optkit::OPTKIT> instance;
+            return instance;
+        }
+
+        inline optkit::OPTKIT &ensure_optkit()
+        {
+            static std::once_flag once;
+            std::call_once(once, []
+                           { optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{/*create_folder*/ true, "", /*init_cpu_frequency*/ false}}); });
+            return *optkit_instance();
+        }
+
+        // "<binary>.0x<offset>" when the caller is inside a loaded object, raw address otherwise.
         inline std::string describe_caller(void *caller)
         {
             char buf[128];
@@ -32,7 +49,7 @@ namespace orbit
                 }
                 const auto offset = reinterpret_cast<std::uintptr_t>(caller) -
                                     reinterpret_cast<std::uintptr_t>(info.dli_fbase);
-                std::snprintf(buf, sizeof(buf), "%s+0x%lx", fname, static_cast<unsigned long>(offset));
+                std::snprintf(buf, sizeof(buf), "%s.0x%lx", fname, static_cast<unsigned long>(offset));
             }
             else
             {
@@ -62,6 +79,13 @@ namespace orbit
               split(legacy),
               parent(active_region)
         {
+            detail::ensure_optkit();
+            optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
+            perf_config.is_screenshot = true;
+            cpu_event_profiler.reset(new optkit::pmu::cpu::perf::BlockProfiler(perf_config, optkit::metrics::performance::cpu_metrics::ai()));
+            cpu_energy_profiler.reset(new optkit::energy::rapl::Profiler(
+                {region.name.c_str(), "cpu_energy", true, false, optkit::Query::create_folder, !optkit::Query::create_folder},
+                optkit::metrics::energy::cpu_metrics::all_metrics()));
             region_begin(region);
             active_region = this;
         }
@@ -76,6 +100,8 @@ namespace orbit
 
         ~RegionScope()
         {
+            cpu_event_profiler.reset();
+            cpu_energy_profiler.reset();
             active_region = parent;
             region_end(region);
         }
