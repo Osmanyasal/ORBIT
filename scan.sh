@@ -85,3 +85,12 @@ for freq in "${FREQUENCIES[@]}"; do
         done
     done
 done
+
+echo ""
+echo "============================================================"
+echo "ORBIT Parameter Sweep Complete!"
+echo "Visualize energy and PMU time-series results with:"
+echo "  python3 tools/orbit-viz.py [run_folder]"
+echo "  python3 tools/orbit-viz.py --terminal [run_folder]"
+echo "============================================================"
+

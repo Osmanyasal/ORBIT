@@ -125,3 +125,34 @@ native-runtime testing has not been performed in the current environment.
 LD_PRELOAD="$PWD/bin/Release/liborbit.so" \
 OMP_DYNAMIC=false ./bin/Release/orbit_test
 ```
+
+## Energy & PMU Time-Series Visualization 📊
+
+ORBIT includes a dedicated visualization tool (`tools/orbit-viz.py`) for analyzing energy consumption, power profiles, and PMU metric time-series changes across periodic execution intervals and parameter sweeps.
+
+It has **zero external package dependencies** (runs out-of-the-box on standard Python 3.6+) and supports interactive HTML dashboards, terminal sparklines, static SVG/PNG vector exports, and live HTTP serving.
+
+```bash
+# 1. Generate an interactive offline HTML dashboard (default: orbit_report.html)
+python3 tools/orbit-viz.py <run_directory>
+
+# 2. View rich ANSI terminal summary tables and Unicode sparklines
+python3 tools/orbit-viz.py --terminal <run_directory>
+
+# 3. Start a local HTTP server to interactively explore the dashboard
+python3 tools/orbit-viz.py --serve 8080 <run_directory>
+
+# 4. Export static SVG and PNG figures (dual-axis power/IPC and cross-region comparison)
+python3 tools/orbit-viz.py --export-plots plots/ <run_directory>
+
+# 5. Output processed metrics and step changes as JSON
+python3 tools/orbit-viz.py --json <run_directory> > report.json
+```
+
+### Visualized Metrics & Changes
+
+- **Energy & Power Profile**: Total package energy (Joules), watt-hours, socket breakdown, average power (Watts), and Energy-Delay Product (EDP $J \cdot s$).
+- **PMU Performance Progression**: Instructions Per Cycle (IPC), core frequency (GHz), instruction throughput (GIPS), L2 cache hit ratio (%), L3 MPKI (misses per 1k instructions), and branch misprediction ratio.
+- **Dynamic Change ($\Delta$)**: Step-by-step performance shifts ($\Delta \text{metric}$), rates of change ($dM/dt$), percentage change ($\% \Delta$), and phase transition tracking.
+- **Cross-Region & Sweep Comparisons**: Side-by-side Pareto efficiency comparisons across parallel regions and thread/schedule/chunk configurations.
+
