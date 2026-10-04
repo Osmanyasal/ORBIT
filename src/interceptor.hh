@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <sys/stat.h>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -22,6 +23,22 @@ namespace orbit
 
     namespace detail
     {
+        // Snapshot: no configuration file was found, so regions run with the settings supplied by the
+        // environment (OMP_NUM_THREADS, OMP_SCHEDULE, ORBIT_CPU_FREQ) and are profiled and recorded.
+        // Optimize: a configuration file exists and its per-region settings are applied at runtime.
+        enum class Mode
+        {
+            Snapshot,
+            Optimize
+        };
+
+        struct Runtime
+        {
+            Mode mode = Mode::Snapshot;
+            std::unordered_map<std::string, Region> configs;
+            std::int64_t frequency = 0;
+        };
+
         // Process-wide OPTKIT instance, created on first use and destroyed at exit.
         // It initialises the logger and PMU query state the profilers rely on.
         inline std::unique_ptr<optkit::OPTKIT> &optkit_instance()
@@ -30,37 +47,54 @@ namespace orbit
             return instance;
         }
 
-        inline optkit::OPTKIT &ensure_optkit()
+        inline Runtime load_runtime()
         {
-            static std::once_flag once;
-            std::call_once(once, []
-                           {
-#if ORBIT_SNAPSHOT
-                               constexpr bool create_folder = true;
-                               const std::int64_t khz = utils::requested_cpu_frequency_khz();
-                               const bool restore_freq = khz > 0;
-#else
-                               constexpr bool create_folder = false;
-                               const std::int64_t khz = utils::requested_cpu_frequency_khz();
-                               const bool restore_freq = true;
-#endif
-                               optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{create_folder, "", restore_freq}});
-                               if (khz > 0)
-                               {
-                                   try
-                                   {
-                                       for (int socket = 0; socket < OPTKIT_ENV_CPU_NUM_SOCKETS; ++socket)
-                                       {
-                                           optkit::frequency::cpu::Frequency::set_core_frequency(khz, socket);
-                                       }
-                                       std::fprintf(stderr, "ORBIT: CPU frequency set to %lld kHz\n", static_cast<long long>(khz));
-                                   }
-                                   catch (const std::exception &error)
-                                   {
-                                       OPTKIT_ERROR("ORBIT: cannot set CPU frequency: {}", error.what());
-                                   }
-                               } });
-            return *optkit_instance();
+            Runtime runtime;
+            runtime.frequency = utils::requested_cpu_frequency_khz();
+
+            const std::string config_path = utils::optimized_config_path();
+            struct stat config_status;
+            if (stat(config_path.c_str(), &config_status) == 0 && S_ISREG(config_status.st_mode))
+            {
+                runtime.mode = Mode::Optimize;
+                runtime.configs = read_region_configs(config_path);
+                std::fprintf(stderr, "ORBIT: optimize mode, %zu region(s) read from %s\n",
+                             runtime.configs.size(), config_path.c_str());
+            }
+            else
+            {
+                std::fprintf(stderr, "ORBIT: %s not found, snapshot mode\n", config_path.c_str());
+            }
+
+            const bool snapshot = runtime.mode == Mode::Snapshot;
+            // Optimize mode changes the frequency per region, so the original must always be restored.
+            const bool restore_freq = !snapshot || runtime.frequency > 0;
+            optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{snapshot, "", restore_freq}});
+
+            if (runtime.frequency > 0)
+            {
+                try
+                {
+                    for (int socket = 0; socket < OPTKIT_ENV_CPU_NUM_SOCKETS; ++socket)
+                    {
+                        optkit::frequency::cpu::Frequency::set_core_frequency(runtime.frequency, socket);
+                    }
+                    std::fprintf(stderr, "ORBIT: CPU frequency set to %lld kHz\n",
+                                 static_cast<long long>(runtime.frequency));
+                }
+                catch (const std::exception &error)
+                {
+                    OPTKIT_ERROR("ORBIT: cannot set CPU frequency: {}", error.what());
+                }
+            }
+            return runtime;
+        }
+
+        // Selects the mode, reads the configuration and initialises OPTKIT once, on first use.
+        inline const Runtime &ensure_runtime()
+        {
+            static const Runtime runtime = load_runtime();
+            return runtime;
         }
     }
 
@@ -84,27 +118,28 @@ namespace orbit
               split(legacy),
               parent(active_region)
         {
-            detail::ensure_optkit();
-#if ORBIT_OPTIMIZER
-            static std::unordered_map<std::string, Region> region_configs = read_region_configs(utils::optimized_config_path());
-            const auto it = region_configs.find(region.name);
-            if (it != region_configs.end())
+            const detail::Runtime &runtime = detail::ensure_runtime();
+            if (runtime.mode == detail::Mode::Optimize)
             {
-                region.threads = it->second.threads;
-                region.chunk = it->second.chunk;
-                region.sched = it->second.sched;
-                region.frequency = it->second.frequency;
+                const auto it = runtime.configs.find(region.name);
+                if (it != runtime.configs.end())
+                {
+                    region.threads = it->second.threads;
+                    region.chunk = it->second.chunk;
+                    region.sched = it->second.sched;
+                    region.frequency = it->second.frequency;
+                }
             }
-#elif ORBIT_SNAPSHOT
-            static const std::int64_t default_freq = utils::requested_cpu_frequency_khz();
-            region.frequency = default_freq;
-            optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
-            perf_config.is_screenshot = true;
-            cpu_event_profiler.reset(new optkit::pmu::cpu::perf::BlockProfiler(perf_config, optkit::metrics::performance::cpu_metrics::ai()));
-            cpu_energy_profiler.reset(new optkit::energy::rapl::Profiler(
-                {region.name.c_str(), "cpu_energy", true, false, optkit::Query::create_folder, !optkit::Query::create_folder},
-                optkit::metrics::energy::cpu_metrics::all_metrics()));
-#endif
+            else if (runtime.mode == detail::Mode::Snapshot)
+            {
+                region.frequency = runtime.frequency;
+                optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
+                perf_config.is_screenshot = true;
+                cpu_event_profiler.reset(new optkit::pmu::cpu::perf::BlockProfiler(perf_config, optkit::metrics::performance::cpu_metrics::ai()));
+                cpu_energy_profiler.reset(new optkit::energy::rapl::Profiler(
+                    {region.name.c_str(), "cpu_energy", true, false, optkit::Query::create_folder, !optkit::Query::create_folder},
+                    optkit::metrics::energy::cpu_metrics::all_metrics()));
+            }
             region_begin(region);
             active_region = this;
         }
@@ -123,10 +158,10 @@ namespace orbit
             cpu_energy_profiler.reset();
             active_region = parent;
             region_end(region);
-#if ORBIT_SNAPSHOT
-            region.append_to_file(optkit::utils::EXECUTION_FOLDER_NAME + "/snapshot.conf");
-#elif ORBIT_OPTIMIZER
-#endif
+            if (detail::ensure_runtime().mode == detail::Mode::Snapshot)
+            {
+                region.append_to_file(optkit::utils::EXECUTION_FOLDER_NAME + "/snapshot.conf");
+            }
         }
 
         RegionScope(const RegionScope &) = delete;

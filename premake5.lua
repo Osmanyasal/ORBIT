@@ -29,7 +29,7 @@ newoption {
 workspace "ORBIT"
     configurations { "Debug", "Release", "Test" }
     location "build"
-    startproject "snapshot"
+    startproject "orbit"
 
 local optkit_root = "lib/OPTKIT"
 local optkit_spdlog_root = optkit_root .. "/lib/spdlog"
@@ -134,18 +134,11 @@ local function interceptor_backend_setup()
     end
 end
 
-project "optimizer"
+project "orbit"
     kind "SharedLib"
-    targetname "optimizer"
+    targetname "orbit"
     base_project_setup()
-    files { "src/optimizer.cc", "src/interceptor*.hh", "src/region.hh", "src/utils.hh" }
-    interceptor_backend_setup()
-
-project "snapshot"
-    kind "SharedLib"
-    targetname "snapshot"
-    base_project_setup()
-    files { "src/snapshot.cc", "src/interceptor*.hh", "src/region.hh", "src/utils.hh" }
+    files { "src/orbit.cc", "src/interceptor*.hh", "src/region.hh", "src/utils.hh" }
     interceptor_backend_setup()
 
 project "analiser"

@@ -16,7 +16,7 @@ alias premake5="$PWD/bin/release/premake5"
 popd
 
 premake5 gmake
-make -C build config=release optimizer snapshot orbit_test
+make -C build config=release orbit orbit_test
 ```
 
 ## OpenMP Backends
@@ -26,7 +26,7 @@ makefiles after changing backend options:
 
 ```bash
 premake5 --openmp-backend=gcc gmake
-make -C build snapshot
+make -C build orbit
 ```
 
 For Intel/libiomp5 or Clang/libomp, select `--openmp-backend=intel` or
@@ -40,7 +40,7 @@ If libffi is installed in a custom prefix:
 
 ```bash
 premake5 --openmp-backend=clang --libffi-root=/path/to/libffi gmake
-make -C build snapshot
+make -C build orbit
 ```
 
 Some distributions put libffi headers in a versioned directory; ensure that
@@ -50,21 +50,31 @@ development package is commonly named `libffi-devel`; on Debian/Ubuntu it is
 
 ## Per-Region OpenMP Interception
 
-Preload one library into an application using the selected OpenMP runtime.
-`snapshot` logs parallel-region begin/end; `optimizer` starts with
-empty begin/end hooks. Neither requires OPTKIT.
+Preload `liborbit.so` into an application using the selected OpenMP runtime.
+On start ORBIT looks for a configuration file (`ORBIT_OPTIMIZED_CONF`, then
+`ORBIT_CONFIG`, default `optimized.conf`) and picks its mode:
+
+- **Optimize** (file exists): the per-region `threads`, `sched`, `chunk` and
+  `frequency` it contains are applied to the matching regions at runtime.
+- **Snapshot** (no file): regions run with the settings given by the
+  environment and are profiled; each region is appended to
+  `snapshot.conf` in the OPTKIT execution folder. Run the application several
+  times, varying `OMP_NUM_THREADS`, `OMP_SCHEDULE` (schedule and chunk) and
+  `ORBIT_CPU_FREQ` (MHz, or with a unit such as `2.4GHz`), to compare settings.
 
 ```bash
-LD_PRELOAD="$PWD/bin/Release/libsnapshot.so" ./your_application
+# snapshot analysis (no optimized.conf present)
+OMP_NUM_THREADS=8 OMP_SCHEDULE=dynamic,4 ORBIT_CPU_FREQ=2400 \
+LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
+
+# apply the chosen settings
+ORBIT_OPTIMIZED_CONF=optimized.conf LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
 ```
 
-Edit `region_begin` and `region_end` directly in `src/optimizer.cc` or
-`src/snapshot.cc`. They run on the thread initiating the region, immediately
-before the real runtime call and after its team finishes. For legacy GCC split
+Edit `region_begin` and `region_end` directly in `src/orbit.cc`. They run on
+the thread initiating the region, immediately before the real runtime call and after its team finishes. For legacy GCC split
 regions, begin runs at `GOMP_parallel_start` and end after `GOMP_parallel_end`.
 The outlined function and caller address identify the region within the process.
-There are no region IDs, environment settings, external callbacks, automatic
-policy selection, counters, or timing infrastructure.
 
 ```cpp
 static void region_begin(Region& region) {
@@ -102,9 +112,6 @@ native-runtime testing has not been performed in the current environment.
 ## Tests
 
 ```bash
-LD_PRELOAD="$PWD/bin/Release/liboptimizer.so" \
-OMP_DYNAMIC=false ./bin/Release/orbit_test
-
-LD_PRELOAD="$PWD/bin/Release/libsnapshot.so" \
+LD_PRELOAD="$PWD/bin/Release/liborbit.so" \
 OMP_DYNAMIC=false ./bin/Release/orbit_test
 ```
