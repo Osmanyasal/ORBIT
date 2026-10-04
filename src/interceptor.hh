@@ -5,12 +5,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <omp.h>
 #include <string>
+#include <unordered_map>
 #include "optkit.hh"
 #include "region.hh"
+#include "utils.hh"
 
 namespace orbit
 {
@@ -31,31 +34,33 @@ namespace orbit
         {
             static std::once_flag once;
             std::call_once(once, []
-                           { optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{/*create_folder*/ true, "", /*init_cpu_frequency*/ false}}); });
+                           {
+#if ORBIT_SNAPSHOT
+                               constexpr bool create_folder = true;
+                               const std::int64_t khz = utils::requested_cpu_frequency_khz();
+                               const bool restore_freq = khz > 0;
+#else
+                               constexpr bool create_folder = false;
+                               const std::int64_t khz = utils::requested_cpu_frequency_khz();
+                               const bool restore_freq = true;
+#endif
+                               optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{create_folder, "", restore_freq}});
+                               if (khz > 0)
+                               {
+                                   try
+                                   {
+                                       for (int socket = 0; socket < OPTKIT_ENV_CPU_NUM_SOCKETS; ++socket)
+                                       {
+                                           optkit::frequency::cpu::Frequency::set_core_frequency(khz, socket);
+                                       }
+                                       std::fprintf(stderr, "ORBIT: CPU frequency set to %lld kHz\n", static_cast<long long>(khz));
+                                   }
+                                   catch (const std::exception &error)
+                                   {
+                                       OPTKIT_ERROR("ORBIT: cannot set CPU frequency: {}", error.what());
+                                   }
+                               } });
             return *optkit_instance();
-        }
-
-        // "<binary>.0x<offset>" when the caller is inside a loaded object, raw address otherwise.
-        inline std::string describe_caller(void *caller)
-        {
-            char buf[128];
-            Dl_info info{};
-            if (dladdr(caller, &info) && info.dli_fbase)
-            {
-                const char *fname = info.dli_fname ? info.dli_fname : "unknown";
-                if (const char *slash = std::strrchr(fname, '/'))
-                {
-                    fname = slash + 1;
-                }
-                const auto offset = reinterpret_cast<std::uintptr_t>(caller) -
-                                    reinterpret_cast<std::uintptr_t>(info.dli_fbase);
-                std::snprintf(buf, sizeof(buf), "%s.0x%lx", fname, static_cast<unsigned long>(offset));
-            }
-            else
-            {
-                std::snprintf(buf, sizeof(buf), "%p", caller);
-            }
-            return buf;
         }
     }
 
@@ -75,17 +80,31 @@ namespace orbit
                     unsigned threads, long chunk = 0, bool legacy = false)
             : region{function, caller, entry,
                      threads ? static_cast<int>(threads) : omp_get_max_threads(),
-                     chunk, omp_sched_static, detail::describe_caller(caller)},
+                     chunk ? chunk : utils::current_chunk(), utils::current_sched(), utils::describe_caller(caller)},
               split(legacy),
               parent(active_region)
         {
             detail::ensure_optkit();
+#if ORBIT_OPTIMIZER
+            static std::unordered_map<std::string, Region> region_configs = read_region_configs(utils::optimized_config_path());
+            const auto it = region_configs.find(region.name);
+            if (it != region_configs.end())
+            {
+                region.threads = it->second.threads;
+                region.chunk = it->second.chunk;
+                region.sched = it->second.sched;
+                region.frequency = it->second.frequency;
+            }
+#elif ORBIT_SNAPSHOT
+            static const std::int64_t default_freq = utils::requested_cpu_frequency_khz();
+            region.frequency = default_freq;
             optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
             perf_config.is_screenshot = true;
             cpu_event_profiler.reset(new optkit::pmu::cpu::perf::BlockProfiler(perf_config, optkit::metrics::performance::cpu_metrics::ai()));
             cpu_energy_profiler.reset(new optkit::energy::rapl::Profiler(
                 {region.name.c_str(), "cpu_energy", true, false, optkit::Query::create_folder, !optkit::Query::create_folder},
                 optkit::metrics::energy::cpu_metrics::all_metrics()));
+#endif
             region_begin(region);
             active_region = this;
         }
@@ -104,6 +123,10 @@ namespace orbit
             cpu_energy_profiler.reset();
             active_region = parent;
             region_end(region);
+#if ORBIT_SNAPSHOT
+            region.append_to_file(optkit::utils::EXECUTION_FOLDER_NAME + "/snapshot.conf");
+#elif ORBIT_OPTIMIZER
+#endif
         }
 
         RegionScope(const RegionScope &) = delete;
@@ -121,7 +144,7 @@ namespace orbit
         void *address = dlsym(RTLD_NEXT, name);
         if (!address)
         {
-            std::fprintf(stderr, "ORBIT: cannot resolve OpenMP symbol: %s\n", name);
+            OPTKIT_ERROR("ORBIT: cannot resolve OpenMP symbol: {}", name);
             std::_Exit(EXIT_FAILURE);
         }
         return reinterpret_cast<Function>(address);

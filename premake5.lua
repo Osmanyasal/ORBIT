@@ -138,21 +138,21 @@ project "optimizer"
     kind "SharedLib"
     targetname "optimizer"
     base_project_setup()
-    files { "src/optimizer.cc", "src/interceptor*.hh", "src/region.hh" }
+    files { "src/optimizer.cc", "src/interceptor*.hh", "src/region.hh", "src/utils.hh" }
     interceptor_backend_setup()
 
 project "snapshot"
     kind "SharedLib"
     targetname "snapshot"
     base_project_setup()
-    files { "src/snapshot.cc", "src/interceptor*.hh", "src/region.hh" }
+    files { "src/snapshot.cc", "src/interceptor*.hh", "src/region.hh", "src/utils.hh" }
     interceptor_backend_setup()
 
 project "analiser"
     kind "ConsoleApp"
     targetname "analiser"
     base_project_setup()
-    files { "src/analiser.cc", "src/region.hh" }
+    files { "src/analiser.cc", "src/region.hh", "src/utils.hh" }
 
 project "orbit_test"
     kind "ConsoleApp"

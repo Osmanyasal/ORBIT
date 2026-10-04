@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <mutex>
 #include <omp.h>
+#include "utils.hh"
 
 namespace orbit
 {
@@ -52,6 +54,7 @@ namespace orbit
         long chunk = 0;
         omp_sched_t sched = static_cast<omp_sched_t>(0);
         std::string name;
+        std::int64_t frequency = 0;
 
         std::string to_json() const
         {
@@ -68,7 +71,8 @@ namespace orbit
                << "  \"entry\": \"" << (entry ? entry : "") << "\",\n"
                << "  \"threads\": " << threads << ",\n"
                << "  \"sched\": \"" << sched_to_string(sched) << "\",\n"
-               << "  \"chunk\": " << chunk << "\n"
+               << "  \"chunk\": " << chunk << ",\n"
+               << "  \"frequency\": " << frequency << "\n"
                << "}\n";
             return ss.str();
         }
@@ -195,6 +199,23 @@ namespace orbit
                 }
                 catch (...)
                 {
+                }
+            }
+            else if (key == "frequency")
+            {
+                if (val.find_first_not_of("0123456789") == std::string::npos)
+                {
+                    try
+                    {
+                        current.frequency = std::stoll(val);
+                    }
+                    catch (...)
+                    {
+                    }
+                }
+                else
+                {
+                    current.frequency = utils::parse_cpu_frequency_khz(str_val);
                 }
             }
         }

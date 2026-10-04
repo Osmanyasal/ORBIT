@@ -32,7 +32,7 @@ extern "C" void __kmpc_push_num_threads(orbit::kmp::Location* location,
 extern "C" void __kmpc_fork_call(orbit::kmp::Location* location, std::int32_t argc,
                                 orbit::kmp::Microtask function, ...) {
     if (argc < 0) {
-        std::fprintf(stderr, "ORBIT: negative captured-argument count\n");
+        OPTKIT_ERROR("ORBIT: negative captured-argument count");
         std::_Exit(EXIT_FAILURE);
     }
     using Function = void (*)(orbit::kmp::Location*, std::int32_t, orbit::kmp::Microtask, ...);
@@ -55,14 +55,14 @@ extern "C" void __kmpc_fork_call(orbit::kmp::Location* location, std::int32_t ar
     ffi_cif interface;
     if (ffi_prep_cif_var(&interface, FFI_DEFAULT_ABI, 3, total,
                          &ffi_type_void, types.data()) != FFI_OK) {
-        std::fprintf(stderr, "ORBIT: cannot prepare OpenMP fork call\n");
+        OPTKIT_ERROR("ORBIT: cannot prepare OpenMP fork call");
         std::_Exit(EXIT_FAILURE);
     }
     const unsigned requested_threads = orbit::kmp::pending_threads;
     orbit::kmp::pending_threads = 0;
     orbit::RegionScope scope(function, __builtin_return_address(0), "__kmpc_fork_call", requested_threads);
     if (scope.region.threads > INT_MAX) {
-        std::fprintf(stderr, "ORBIT: thread count exceeds KMP ABI range\n");
+        OPTKIT_ERROR("ORBIT: thread count exceeds KMP ABI range");
         std::_Exit(EXIT_FAILURE);
     }
     if (scope.region.threads && scope.region.threads != requested_threads) {
