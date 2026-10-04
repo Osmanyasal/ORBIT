@@ -70,6 +70,17 @@ LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
 ORBIT_OPTIMIZED_CONF=optimized.conf LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
 ```
 
+### Snapshot Profiling Considerations
+
+In Snapshot mode, the interceptor enables both screenshot collection (`is_screenshot = true`) and periodic sampling (`is_sampling = true` with 1-second intervals) to capture time-series datasets. This mode is designed for parallel regions running for at least 1 second:
+
+| Aspect | Parallel Region < 1 second | Parallel Region $\ge$ 1 second |
+| :--- | :--- | :--- |
+| **Time-Series Samples** | Only 1–2 samples; no time-series progression | Produces sequential 1-second interval samples |
+| **Exit Latency** | Destructor blocks up to ~1s in thread join | Negligible relative overhead (joins fractional sleep) |
+| **Dataset Usability (train)** | Insufficient sequence length for GRU model | Valid time-series dataset |
+| **Memory Footprint** | Low (only 1–2 samples) | Grows linearly with execution time ($O(N)$ in RAM) |
+
 Edit `region_begin` and `region_end` directly in `src/orbit.cc`. They run on
 the thread initiating the region, immediately before the real runtime call and after its team finishes. For legacy GCC split
 regions, begin runs at `GOMP_parallel_start` and end after `GOMP_parallel_end`.

@@ -16,6 +16,7 @@
 #include "region.hh"
 #include "utils.hh"
 
+
 namespace orbit
 {
     static void region_begin(Region &region);
@@ -138,11 +139,11 @@ namespace orbit
             else if (runtime.mode == detail::Mode::Snapshot)
             {
                 region.frequency = runtime.frequency;   // set the region frequency to the runtime frequency in snapshot mode
-                optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
+                optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), true /*is_sampling*/};
                 perf_config.is_screenshot = true;
                 cpu_event_profiler.reset(new optkit::pmu::cpu::perf::BlockProfiler(perf_config, optkit::metrics::performance::cpu_metrics::ai()));
                 cpu_energy_profiler.reset(new optkit::energy::rapl::Profiler(
-                    {region.name.c_str(), "cpu_energy", true, false, optkit::Query::create_folder, !optkit::Query::create_folder},
+                    {region.name.c_str(), "cpu_energy", true, true, optkit::Query::create_folder, !optkit::Query::create_folder},
                     optkit::metrics::energy::cpu_metrics::all_metrics()));
             }
             region_begin(region);
