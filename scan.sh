@@ -21,10 +21,14 @@ fi
 unset ORBIT_OPTIMIZED_CONF
 
 # Thread counts to test (modify or add values as needed)
-THREADS=(1 2 4 8)
+THREADS=""
+for ((i=1; i<=$(nproc); i*=2)); do
+    THREADS+="$i "
+done
+THREADS=($THREADS)
 
 # OpenMP scheduling policies
-SCHEDULES=("static" "dynamic" "guided")
+SCHEDULES=("static" "dynamic")
 
 # Chunk sizes to test
 CHUNKS=(1 4 8 16 32 64 128 256 512 1024)
