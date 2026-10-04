@@ -51,19 +51,18 @@ development package is commonly named `libffi-devel`; on Debian/Ubuntu it is
 ## Per-Region OpenMP Interception
 
 Preload `liborbit.so` into an application using the selected OpenMP runtime.
-On start ORBIT looks for a configuration file (`ORBIT_OPTIMIZED_CONF`, then
-`ORBIT_CONFIG`, default `optimized.conf`) and picks its mode:
+On start ORBIT checks `ORBIT_OPTIMIZED_CONF` and picks its mode:
 
-- **Optimize** (file exists): the per-region `threads`, `sched`, `chunk` and
+- **Optimize** (`ORBIT_OPTIMIZED_CONF` names an existing file): the per-region `threads`, `sched`, `chunk` and
   `frequency` it contains are applied to the matching regions at runtime.
-- **Snapshot** (no file): regions run with the settings given by the
+- **Snapshot** (variable unset or file missing): regions run with the settings given by the
   environment and are profiled; each region is appended to
   `snapshot.conf` in the OPTKIT execution folder. Run the application several
   times, varying `OMP_NUM_THREADS`, `OMP_SCHEDULE` (schedule and chunk) and
   `ORBIT_CPU_FREQ` (MHz, or with a unit such as `2.4GHz`), to compare settings.
 
 ```bash
-# snapshot analysis (no optimized.conf present)
+# snapshot analysis (ORBIT_OPTIMIZED_CONF unset)
 OMP_NUM_THREADS=8 OMP_SCHEDULE=dynamic,4 ORBIT_CPU_FREQ=2400 \
 LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
 

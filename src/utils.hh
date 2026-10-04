@@ -116,16 +116,11 @@ namespace orbit::utils
         return chunk;
     }
 
-    // Returns the path of the optimized configuration file read at startup.
-    // Checks ORBIT_OPTIMIZED_CONF, then ORBIT_CONFIG, defaulting to "optimized.conf".
-    // When the file exists ORBIT applies it; otherwise it runs a snapshot analysis.
+    // Returns the optimized configuration file path from ORBIT_OPTIMIZED_CONF, or nullptr when unset or empty.
+    // When it names an existing file ORBIT applies it; otherwise it runs a snapshot analysis.
     inline const char *optimized_config_path(const char *env_var = "ORBIT_OPTIMIZED_CONF")
     {
         const char *path = std::getenv(env_var);
-        if (!path || !*path)
-        {
-            path = std::getenv("ORBIT_CONFIG");
-        }
-        return (path && *path) ? path : "optimized.conf";
+        return (path && *path) ? path : nullptr;
     }
 }

@@ -52,24 +52,28 @@ namespace orbit
             Runtime runtime;
             runtime.frequency = utils::requested_cpu_frequency_khz();
 
-            const std::string config_path = utils::optimized_config_path();
+            const char *config_path = utils::optimized_config_path();
             struct stat config_status;
-            if (stat(config_path.c_str(), &config_status) == 0 && S_ISREG(config_status.st_mode))
+            if (config_path && 
+                stat(config_path, &config_status) == 0 && 
+                S_ISREG(config_status.st_mode))
             {
                 runtime.mode = Mode::Optimize;
                 runtime.configs = read_region_configs(config_path);
                 std::fprintf(stderr, "ORBIT: optimize mode, %zu region(s) read from %s\n",
-                             runtime.configs.size(), config_path.c_str());
+                             runtime.configs.size(), config_path);
             }
             else
             {
-                std::fprintf(stderr, "ORBIT: %s not found, snapshot mode\n", config_path.c_str());
+                runtime.mode = Mode::Snapshot;
+                std::fprintf(stderr, "ORBIT: %s, snapshot mode active\n",
+                             config_path ? "configuration file not found" : "ORBIT_OPTIMIZED_CONF not set");
             }
 
-            const bool snapshot = runtime.mode == Mode::Snapshot;
+            const bool is_snapshot = runtime.mode == Mode::Snapshot;
             // Optimize mode changes the frequency per region, so the original must always be restored.
-            const bool restore_freq = !snapshot || runtime.frequency > 0;
-            optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{snapshot, "", restore_freq}});
+            const bool restore_freq = !is_snapshot || runtime.frequency > 0;
+            optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{is_snapshot, "", restore_freq}});
 
             if (runtime.frequency > 0)
             {
@@ -121,6 +125,7 @@ namespace orbit
             const detail::Runtime &runtime = detail::ensure_runtime();
             if (runtime.mode == detail::Mode::Optimize)
             {
+                // if there is a configuration for this region, apply it
                 const auto it = runtime.configs.find(region.name);
                 if (it != runtime.configs.end())
                 {
@@ -132,7 +137,7 @@ namespace orbit
             }
             else if (runtime.mode == detail::Mode::Snapshot)
             {
-                region.frequency = runtime.frequency;
+                region.frequency = runtime.frequency;   // set the region frequency to the runtime frequency in snapshot mode
                 optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
                 perf_config.is_screenshot = true;
                 cpu_event_profiler.reset(new optkit::pmu::cpu::perf::BlockProfiler(perf_config, optkit::metrics::performance::cpu_metrics::ai()));
