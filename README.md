@@ -151,6 +151,7 @@ python3 tools/orbit-viz.py --json <run_directory> > report.json
 
 ### Visualized Metrics & Changes
 
+- **Continuous Program Sequence**: Chronological execution timeline chaining all parallel regions based on file creation time ordering, with region transition boundaries, program sequence ribbon, and full-run energy/power/PMU evolution.
 - **Energy & Power Profile**: Total package energy (Joules), watt-hours, socket breakdown, average power (Watts), and Energy-Delay Product (EDP $J \cdot s$).
 - **PMU Performance Progression**: Instructions Per Cycle (IPC), core frequency (GHz), instruction throughput (GIPS), L2 cache hit ratio (%), L3 MPKI (misses per 1k instructions), and branch misprediction ratio.
 - **Dynamic Change ($\Delta$)**: Step-by-step performance shifts ($\Delta \text{metric}$), rates of change ($dM/dt$), percentage change ($\% \Delta$), and phase transition tracking.

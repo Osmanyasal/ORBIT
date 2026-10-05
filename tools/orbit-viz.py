@@ -298,7 +298,6 @@ class MetricChange:
                 prev_v = values[i - 1]
                 curr_v = values[i]
                 dt = max(times[i] - times[i - 1], 1e-6)
-
                 delta = curr_v - prev_v
                 self.deltas.append(delta)
                 self.rates_of_change.append(delta / dt)
@@ -338,9 +337,11 @@ class MetricChange:
 
 class RegionData:
     """Contains all PMU, Energy, and Config data for a single intercepted OpenMP region."""
-    def __init__(self, name: str, config: Optional[RegionConfig] = None):
+    def __init__(self, name: str, config: Optional[RegionConfig] = None,
+                 file_timestamp: Optional[float] = None):
         self.name = name
         self.config = config or RegionConfig(name=name)
+        self.file_timestamp = file_timestamp
         self.pmu_aggregate: Optional[PmuSample] = None
         self.pmu_samples: List[PmuSample] = []
         self.energy_profile: Optional[EnergyProfile] = None
@@ -369,15 +370,12 @@ class RegionData:
         if self.energy_profile and self.energy_profile.total_power_w > 0:
             avg_p = self.energy_profile.total_power_w
             # Energy consumption scaled with activity: Power correlates strongly with (Freq * IPC * active cores)
-            # Baseline power + dynamic power component
             power_values = []
             ipc_vals = [s.get_val("ipc") or 1.0 for s in self.pmu_samples]
             mean_ipc = (sum(ipc_vals) / len(ipc_vals)) if ipc_vals else 1.0
             for s in self.pmu_samples:
                 cur_ipc = s.get_val("ipc") or mean_ipc
-                # Estimate dynamic power variance around mean power proportional to IPC activity
                 ratio = cur_ipc / max(mean_ipc, 1e-3)
-                # Dampen variance so dynamic range is realistic (±15% around average power)
                 estimated_p = avg_p * (0.85 + 0.15 * ratio)
                 power_values.append(estimated_p)
             self.metric_changes["power_w"] = MetricChange("Power (W)", times, power_values)
@@ -389,12 +387,160 @@ class RegionData:
                 self.metric_changes[key] = MetricChange(label, times, clean_vals)
 
     def to_dict(self) -> Dict[str, Any]:
+        file_time_str = ""
+        if self.file_timestamp:
+            try:
+                file_time_str = datetime.datetime.fromtimestamp(self.file_timestamp).strftime("%H:%M:%S.%f")[:-3]
+            except Exception:
+                file_time_str = ""
         return {
             "name": self.name,
             "config": self.config.to_dict(),
+            "file_timestamp": self.file_timestamp,
+            "file_time_str": file_time_str,
             "pmu_aggregate": self.pmu_aggregate.to_dict() if self.pmu_aggregate else None,
             "pmu_samples": [s.to_dict() for s in self.pmu_samples],
             "energy_profile": self.energy_profile.to_dict() if self.energy_profile else None,
+            "metric_changes": {k: v.to_dict() for k, v in self.metric_changes.items()},
+        }
+
+
+class ContinuousSegment:
+    """Represents a single region phase within the continuous execution sequence."""
+    def __init__(self, region_name: str, region_index: int,
+                 start_time_s: float, end_time_s: float, duration_s: float,
+                 total_energy_j: float, avg_power_w: float, avg_ipc: float,
+                 threads: int = 1, sched: str = "static", chunk: int = 0,
+                 sample_count: int = 0, file_timestamp: Optional[float] = None,
+                 file_time_str: str = ""):
+        self.region_name = region_name
+        self.region_index = region_index
+        self.start_time_s = start_time_s
+        self.end_time_s = end_time_s
+        self.duration_s = duration_s
+        self.total_energy_j = total_energy_j
+        self.avg_power_w = avg_power_w
+        self.avg_ipc = avg_ipc
+        self.threads = threads
+        self.sched = sched
+        self.chunk = chunk
+        self.sample_count = sample_count
+        self.file_timestamp = file_timestamp
+        self.file_time_str = file_time_str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "region_name": self.region_name,
+            "region_index": self.region_index,
+            "start_time_s": self.start_time_s,
+            "end_time_s": self.end_time_s,
+            "duration_s": self.duration_s,
+            "total_energy_j": self.total_energy_j,
+            "avg_power_w": self.avg_power_w,
+            "avg_ipc": self.avg_ipc,
+            "threads": self.threads,
+            "sched": self.sched,
+            "chunk": self.chunk,
+            "sample_count": self.sample_count,
+            "file_timestamp": self.file_timestamp,
+            "file_time_str": self.file_time_str,
+        }
+
+
+class ContinuousSample:
+    """Represents a periodic PMU & Power sample positioned on the continuous global timeline."""
+    def __init__(self, global_idx: int, region_name: str, region_idx: int,
+                 region_sample_idx: int, global_start_time_s: float,
+                 global_end_time_s: float, global_mid_time_s: float,
+                 region_mid_time_s: float, duration_ms: float,
+                 power_w: float, events: Dict[str, float],
+                 metrics: Dict[str, float], derived: Dict[str, float]):
+        self.global_idx = global_idx
+        self.region_name = region_name
+        self.region_idx = region_idx
+        self.region_sample_idx = region_sample_idx
+        self.global_start_time_s = global_start_time_s
+        self.global_end_time_s = global_end_time_s
+        self.global_mid_time_s = global_mid_time_s
+        self.region_mid_time_s = region_mid_time_s
+        self.duration_ms = duration_ms
+        self.power_w = power_w
+        self.events = events
+        self.metrics = metrics
+        self.derived = derived
+
+    def get_val(self, key: str) -> Optional[float]:
+        if key == "power_w":
+            return self.power_w
+        if key in self.metrics:
+            return self.metrics[key]
+        if key in self.events:
+            return self.events[key]
+        if key in self.derived:
+            return self.derived[key]
+        return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "global_idx": self.global_idx,
+            "region_name": self.region_name,
+            "region_idx": self.region_idx,
+            "region_sample_idx": self.region_sample_idx,
+            "global_start_time_s": self.global_start_time_s,
+            "global_end_time_s": self.global_end_time_s,
+            "global_mid_time_s": self.global_mid_time_s,
+            "region_mid_time_s": self.region_mid_time_s,
+            "duration_ms": self.duration_ms,
+            "power_w": self.power_w,
+            "events": self.events,
+            "metrics": self.metrics,
+            "derived": self.derived,
+        }
+
+
+class ContinuousSequence:
+    """Continuous program execution timeline chaining all parallel regions in creation order."""
+    def __init__(self, segments: List[ContinuousSegment], samples: List[ContinuousSample],
+                 total_duration_s: float, total_energy_j: float, avg_power_w: float, edp_js: float):
+        self.segments = segments
+        self.samples = samples
+        self.total_duration_s = total_duration_s
+        self.total_energy_j = total_energy_j
+        self.avg_power_w = avg_power_w
+        self.edp_js = edp_js
+        self.metric_changes: Dict[str, MetricChange] = {}
+
+    def compute_changes(self) -> None:
+        if not self.samples:
+            return
+        times = [s.global_mid_time_s for s in self.samples]
+        pow_vals = [s.power_w for s in self.samples]
+        self.metric_changes["power_w"] = MetricChange("Power (W)", times, pow_vals)
+
+        metric_keys = [
+            ("ipc", "IPC (Instructions Per Cycle)"),
+            ("freq_ghz", "Effective Frequency (GHz)"),
+            ("gips", "Throughput (GIPS)"),
+            ("l2_hit_ratio", "L2 Hit Ratio (%)"),
+            ("l3_mpki", "L3 MPKI (Misses/K-Instr)"),
+            ("branch_mispr_ratio", "Branch Misprediction Ratio"),
+            ("l2_miss_rate_mps", "L2 Miss Rate (M/sec)"),
+            ("l3_miss_rate_mps", "L3 Miss Rate (M/sec)"),
+        ]
+        for key, label in metric_keys:
+            vals = [s.get_val(key) for s in self.samples]
+            if any(v is not None for v in vals):
+                clean_vals = [v if v is not None else 0.0 for v in vals]
+                self.metric_changes[key] = MetricChange(label, times, clean_vals)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "total_duration_s": self.total_duration_s,
+            "total_energy_j": self.total_energy_j,
+            "avg_power_w": self.avg_power_w,
+            "edp_js": self.edp_js,
+            "segments": [s.to_dict() for s in self.segments],
+            "samples": [s.to_dict() for s in self.samples],
             "metric_changes": {k: v.to_dict() for k, v in self.metric_changes.items()},
         }
 
@@ -406,6 +552,7 @@ class RunData:
         self.folder_name = os.path.basename(self.folder_path.rstrip("/\\"))
         self.timestamp = self._parse_folder_timestamp(self.folder_name)
         self.regions: Dict[str, RegionData] = {}
+        self.continuous_sequence: Optional[ContinuousSequence] = None
 
     @staticmethod
     def _parse_folder_timestamp(name: str) -> Optional[datetime.datetime]:
@@ -419,12 +566,116 @@ class RunData:
                 pass
         return None
 
+    def build_continuous_sequence(self) -> None:
+        """Construct continuous program sequence chaining all parallel regions in creation order."""
+        segments: List[ContinuousSegment] = []
+        samples: List[ContinuousSample] = []
+        current_time = 0.0
+        total_energy = 0.0
+
+        for idx, (reg_name, reg) in enumerate(self.regions.items(), start=1):
+            dur_s = reg.energy_profile.duration_ms / 1000.0 if reg.energy_profile else (
+                reg.pmu_aggregate.duration_ms / 1000.0 if reg.pmu_aggregate else 0.0
+            )
+            if dur_s <= 0 and reg.pmu_samples:
+                dur_s = sum(s.duration_ms for s in reg.pmu_samples) / 1000.0
+            if dur_s <= 0:
+                dur_s = 0.001
+
+            energy_j = reg.energy_profile.total_energy_pkg if reg.energy_profile else 0.0
+            power_w = reg.energy_profile.total_power_w if reg.energy_profile else 0.0
+            avg_ipc = (reg.pmu_aggregate.metrics.get("ipc") or 0.0) if reg.pmu_aggregate else 0.0
+
+            seg_start = current_time
+            seg_end = current_time + max(dur_s, 0.001)
+
+            file_time_str = ""
+            if reg.file_timestamp:
+                try:
+                    file_time_str = datetime.datetime.fromtimestamp(reg.file_timestamp).strftime("%H:%M:%S.%f")[:-3]
+                except Exception:
+                    file_time_str = ""
+
+            segment = ContinuousSegment(
+                region_name=reg_name,
+                region_index=idx,
+                start_time_s=seg_start,
+                end_time_s=seg_end,
+                duration_s=dur_s,
+                total_energy_j=energy_j,
+                avg_power_w=power_w,
+                avg_ipc=avg_ipc,
+                threads=reg.config.threads if reg.config else 0,
+                sched=reg.config.sched if reg.config else "",
+                chunk=reg.config.chunk if reg.config else 0,
+                sample_count=len(reg.pmu_samples),
+                file_timestamp=reg.file_timestamp,
+                file_time_str=file_time_str,
+            )
+            segments.append(segment)
+            total_energy += energy_j
+
+            pow_mc = reg.metric_changes.get("power_w")
+            if reg.pmu_samples:
+                for s_idx, s in enumerate(reg.pmu_samples):
+                    p_w = pow_mc.values[s_idx] if (pow_mc and s_idx < len(pow_mc.values)) else power_w
+                    cs = ContinuousSample(
+                        global_idx=len(samples) + 1,
+                        region_name=reg_name,
+                        region_idx=idx,
+                        region_sample_idx=s.sample_idx,
+                        global_start_time_s=seg_start + s.start_time_s,
+                        global_end_time_s=seg_start + s.end_time_s,
+                        global_mid_time_s=seg_start + s.mid_time_s,
+                        region_mid_time_s=s.mid_time_s,
+                        duration_ms=s.duration_ms,
+                        power_w=p_w,
+                        events=s.events.copy(),
+                        metrics=s.metrics.copy(),
+                        derived=s.derived.copy(),
+                    )
+                    samples.append(cs)
+            elif reg.pmu_aggregate:
+                cs = ContinuousSample(
+                    global_idx=len(samples) + 1,
+                    region_name=reg_name,
+                    region_idx=idx,
+                    region_sample_idx=1,
+                    global_start_time_s=seg_start,
+                    global_end_time_s=seg_end,
+                    global_mid_time_s=seg_start + dur_s / 2.0,
+                    region_mid_time_s=dur_s / 2.0,
+                    duration_ms=dur_s * 1000.0,
+                    power_w=power_w,
+                    events=reg.pmu_aggregate.events.copy(),
+                    metrics=reg.pmu_aggregate.metrics.copy(),
+                    derived=reg.pmu_aggregate.derived.copy(),
+                )
+                samples.append(cs)
+
+            current_time = seg_end
+
+        total_dur = current_time
+        avg_pow = (total_energy / max(total_dur, 1e-9)) if total_dur > 0 else 0.0
+        edp = total_energy * total_dur
+
+        self.continuous_sequence = ContinuousSequence(
+            segments=segments,
+            samples=samples,
+            total_duration_s=total_dur,
+            total_energy_j=total_energy,
+            avg_power_w=avg_pow,
+            edp_js=edp,
+        )
+        self.continuous_sequence.compute_changes()
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "folder_name": self.folder_name,
             "folder_path": self.folder_path,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "regions": {k: v.to_dict() for k, v in self.regions.items()},
+            "continuous_sequence": self.continuous_sequence.to_dict() if self.continuous_sequence else None,
         }
 
 
@@ -432,11 +683,40 @@ class RunData:
 # Parsers
 # ==============================================================================
 
-def parse_snapshot_conf(filepath: str) -> Dict[str, RegionConfig]:
-    """Parse snapshot.conf which may contain multiple concatenated JSON objects."""
+def get_file_creation_time(filepath: str) -> float:
+    """Get the earliest creation or modification timestamp for a file."""
+    try:
+        st = os.stat(filepath)
+        # Check birthtime first (macOS, BSD, Windows, statx-enabled Linux filesystems)
+        birth = getattr(st, "st_birthtime", None)
+        if birth is not None and birth > 0:
+            return float(birth)
+        # On Linux without st_birthtime, st_mtime is the write/close timestamp,
+        # and st_ctime is the metadata/inode change timestamp.
+        return float(min(st.st_mtime, st.st_ctime))
+    except OSError:
+        return float("inf")
+
+
+def get_region_file_time(folder_path: str, reg_name: str) -> float:
+    """Find earliest file creation timestamp among PMU and Energy JSON files for a region."""
+    pmu_file = os.path.join(folder_path, f"{reg_name}__cpu_pmu.json")
+    energy_file = os.path.join(folder_path, f"{reg_name}__cpu_energy.json")
+    times = []
+    for f in (pmu_file, energy_file):
+        if os.path.isfile(f):
+            t = get_file_creation_time(f)
+            if not math.isinf(t):
+                times.append(t)
+    return min(times) if times else float("inf")
+
+
+def parse_snapshot_conf(filepath: str) -> Tuple[Dict[str, RegionConfig], List[str]]:
+    """Parse snapshot.conf returning dictionary of configs and ordered region names list."""
     configs: Dict[str, RegionConfig] = {}
+    ordered_names: List[str] = []
     if not os.path.isfile(filepath):
-        return configs
+        return configs, ordered_names
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
@@ -445,9 +725,11 @@ def parse_snapshot_conf(filepath: str) -> Dict[str, RegionConfig]:
             if isinstance(obj, dict) and "name" in obj:
                 cfg = RegionConfig.from_dict(obj)
                 configs[cfg.name] = cfg
+                if cfg.name not in ordered_names:
+                    ordered_names.append(cfg.name)
     except Exception as e:
         print(f"[Warning] Failed parsing {filepath}: {e}", file=sys.stderr)
-    return configs
+    return configs, ordered_names
 
 
 def parse_pmu_json(filepath: str, threads: int = 1) -> Tuple[Optional[PmuSample], List[PmuSample]]:
@@ -634,7 +916,8 @@ def load_run_directory(folder_path: str) -> Optional[RunData]:
 
     # 1. Parse snapshot.conf if available
     conf_path = os.path.join(folder_path, "snapshot.conf")
-    configs = parse_snapshot_conf(conf_path)
+    configs, conf_order = parse_snapshot_conf(conf_path)
+    conf_rank = {name: idx for idx, name in enumerate(conf_order)}
 
     # 2. Discover PMU and Energy JSON files
     pmu_files = glob.glob(os.path.join(folder_path, "*__cpu_pmu.json"))
@@ -653,10 +936,24 @@ def load_run_directory(folder_path: str) -> Optional[RunData]:
         reg_name = base.replace("__cpu_energy.json", "")
         region_names.add(reg_name)
 
-    for reg_name in sorted(region_names):
+    # Sort regions in chronological execution sequence based on file creation time:
+    # 1) Earliest file creation/write timestamp of PMU or Energy JSON file
+    # 2) Sequence order in snapshot.conf (fallback if file timestamps are equal or coarse)
+    # 3) Region name alphabetical fallback
+    def sort_key(name: str) -> Tuple[float, int, str]:
+        f_time = get_region_file_time(folder_path, name)
+        c_idx = conf_rank.get(name, 999999)
+        return (f_time, c_idx, name)
+
+    ordered_regions = sorted(region_names, key=sort_key)
+
+    for reg_name in ordered_regions:
         cfg = configs.get(reg_name, RegionConfig(name=reg_name))
         threads = cfg.threads if (cfg and cfg.threads > 0) else 1
-        reg_data = RegionData(name=reg_name, config=cfg)
+        reg_file_ts = get_region_file_time(folder_path, reg_name)
+        if math.isinf(reg_file_ts):
+            reg_file_ts = None
+        reg_data = RegionData(name=reg_name, config=cfg, file_timestamp=reg_file_ts)
 
         pmu_path = os.path.join(folder_path, f"{reg_name}__cpu_pmu.json")
         if os.path.isfile(pmu_path):
@@ -671,6 +968,7 @@ def load_run_directory(folder_path: str) -> Optional[RunData]:
         reg_data.compute_changes()
         run.regions[reg_name] = reg_data
 
+    run.build_continuous_sequence()
     return run
 
 
@@ -839,6 +1137,48 @@ def render_terminal(runs: List[RunData], region_filter: Optional[str] = None) ->
                 f"{avg_ipc:>7.2f} | {l2_hit:>7.1f}% | {l3_mpki:>8.4f}"
             )
             print(line)
+
+        # Continuous Program Sequence Overview (ordered by file creation time)
+        if run.continuous_sequence and run.continuous_sequence.segments and not region_filter:
+            cs = run.continuous_sequence
+            print(f"\n{c.BOLD}{c.CYAN}--- Continuous Program Execution Sequence (File Creation Time Order) ---{c.RESET}")
+            seq_header = f"{'Seq':>4} | {'Region Name':<20} | {'Created At':<12} | {'Duration':>9} | {'Cumulative Time':>16} | {'Total J':>9} | {'Power (W)':>9} | {'Avg IPC':>7} | {'L2 Hit%':>8}"
+            print(f"{c.BOLD}{seq_header}{c.RESET}")
+            print(subsep)
+
+            for seg in cs.segments:
+                reg = run.regions.get(seg.region_name)
+                l2_hit = (reg.pmu_aggregate.metrics.get("l2_hit_ratio") if (reg and reg.pmu_aggregate) else 0.0) or 0.0
+                time_range = f"{seg.start_time_s:>6.2f}s - {seg.end_time_s:>6.2f}s"
+                time_str = seg.file_time_str if seg.file_time_str else "N/A"
+                print(
+                    f"{seg.region_index:>4} | {seg.region_name:<20} | {time_str:<12} | "
+                    f"{seg.duration_s:>8.2f}s | {time_range:>16} | {seg.total_energy_j:>9.1f} | "
+                    f"{seg.avg_power_w:>9.1f} | {seg.avg_ipc:>7.2f} | {l2_hit:>7.1f}%"
+                )
+
+            print(subsep)
+            print(f"  {c.BOLD}Total Program Execution:{c.RESET} {cs.total_duration_s:.2f}s across {len(cs.segments)} parallel regions | "
+                  f"{c.BOLD}Total Energy:{c.RESET} {cs.total_energy_j:.1f} J | {c.BOLD}Avg Power:{c.RESET} {cs.avg_power_w:.1f} W | "
+                  f"{c.BOLD}EDP:{c.RESET} {cs.edp_js:.1f} J·s")
+
+            # Continuous Progression Sparklines across Entire Program
+            if cs.metric_changes:
+                print(f"\n  {c.BOLD}Continuous Metric Progression Sparklines (Full Program Timeline):{c.RESET}")
+                for m_key in ["power_w", "ipc", "freq_ghz", "l2_hit_ratio", "l3_mpki"]:
+                    mc = cs.metric_changes.get(m_key)
+                    if not mc or not mc.values:
+                        continue
+                    spark = make_sparkline(mc.values, width=16)
+                    first_val = mc.values[0] if mc.values else 0.0
+                    last_val = mc.values[-1] if mc.values else 0.0
+                    net_delta = last_val - first_val
+                    delta_color = c.GREEN if net_delta >= 0 else c.RED
+                    print(
+                        f"    {mc.metric_name:<30}: [{c.CYAN}{spark}{c.RESET}]  "
+                        f"start={first_val:>7.2f} → end={last_val:>7.2f}  "
+                        f"({delta_color}Δ={net_delta:>+7.2f}{c.RESET}, mean={mc.mean_val:>7.2f}, σ={mc.std_dev:>6.2f})"
+                    )
 
         # Time-Series Details for each region
         for name, reg in filtered_regions.items():
@@ -1027,6 +1367,28 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
     #chart-tooltip { position: absolute; background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 8px 12px; font-size: 0.75rem; color: #f8fafc; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 1000; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2); }
     #chart-tooltip .tt-title { font-weight: 700; margin-bottom: 4px; border-bottom: 1px solid #334155; padding-bottom: 3px; color: #fff; }
     #chart-tooltip .tt-row { display: flex; justify-content: space-between; gap: 14px; margin-top: 2px; }
+
+    /* Scope Toggle Toolbar */
+    .chart-toolbar-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .scope-toggle-group { display: inline-flex; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px; padding: 2px; gap: 2px; }
+    .scope-btn { padding: 4px 10px; font-size: 0.75rem; font-weight: 500; border: none; background: transparent; border-radius: 4px; color: var(--text-secondary); cursor: pointer; transition: all 0.15s; }
+    .scope-btn:hover { color: var(--text-primary); }
+    .scope-btn.active { background: #0284c7; color: white; font-weight: 600; }
+    body.dark-theme .scope-btn.active { background: #0284c7; color: #ffffff; }
+
+    /* Program Sequence Ribbon */
+    .sequence-ribbon-container { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border-color); display: flex; flex-direction: column; gap: 8px; }
+    .sequence-ribbon-header { display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+    .sequence-ribbon { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; align-items: stretch; }
+    .sequence-card { flex: 1 1 0; min-width: 180px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: all 0.15s ease; position: relative; }
+    .sequence-card:hover { border-color: var(--accent-blue); transform: translateY(-1px); box-shadow: var(--shadow); }
+    .sequence-card.active { border-color: var(--accent-blue); background: rgba(2, 132, 199, 0.08); box-shadow: 0 0 0 1px var(--accent-blue); }
+    .sequence-card-title { font-size: 0.82rem; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sequence-badge { font-size: 0.68rem; background: rgba(2, 132, 199, 0.12); color: var(--accent-blue); padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+    .sequence-card-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; font-size: 0.72rem; color: var(--text-secondary); }
+    .sequence-card-meta { font-size: 0.68rem; color: var(--text-muted); margin-top: 4px; display: flex; justify-content: space-between; }
+    .region-tag { display: inline-block; font-size: 0.72rem; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: rgba(2, 132, 199, 0.1); color: var(--accent-blue); cursor: pointer; }
+    .region-tag:hover { background: rgba(2, 132, 199, 0.2); }
   </style>
 </head>
 <body>
@@ -1078,17 +1440,33 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
       <div class="chart-card">
         <div class="chart-header">
           <div>
-            <div class="chart-title">Energy Consumption, Power (W) & PMU Performance Progression</div>
-            <div class="chart-desc">Tracks power and PMU metric fluctuations across elapsed region time (1s periodic interval sampling)</div>
+            <div class="chart-title" id="main-chart-title">Energy Consumption, Power (W) & PMU Performance Progression</div>
+            <div class="chart-desc" id="main-chart-desc">Tracks power and PMU metric fluctuations across elapsed execution time (1s periodic interval sampling)</div>
           </div>
-          <div class="chart-toolbar" id="main-chart-toolbar">
-            <button class="chart-btn active" data-metric="ipc">IPC</button>
-            <button class="chart-btn" data-metric="freq_ghz">Core Freq (GHz)</button>
-            <button class="chart-btn" data-metric="l2_hit_ratio">L2 Hit %</button>
-            <button class="chart-btn" data-metric="l3_mpki">L3 MPKI</button>
+          <div class="chart-toolbar-group">
+            <div class="scope-toggle-group" id="scope-toggle-group">
+              <button class="scope-btn active" id="btn-scope-continuous" title="Continuous timeline of all parallel regions in program sequence order">🌐 Continuous (All Regions)</button>
+              <button class="scope-btn" id="btn-scope-single" title="Focus on selected individual parallel region">🔍 Single Region</button>
+            </div>
+            <div class="chart-toolbar" id="main-chart-toolbar">
+              <button class="chart-btn active" data-metric="ipc">IPC</button>
+              <button class="chart-btn" data-metric="freq_ghz">Core Freq (GHz)</button>
+              <button class="chart-btn" data-metric="l2_hit_ratio">L2 Hit %</button>
+              <button class="chart-btn" data-metric="l3_mpki">L3 MPKI</button>
+            </div>
           </div>
         </div>
-        <div class="canvas-container">
+
+        <!-- Program Sequence Ribbon (Chronological Execution Bar) -->
+        <div class="sequence-ribbon-container" id="sequence-ribbon-container">
+          <div class="sequence-ribbon-header">
+            <span>Program Execution Sequence (Ordered by File Creation Time)</span>
+            <span id="sequence-ribbon-summary" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+          </div>
+          <div class="sequence-ribbon" id="sequence-ribbon"></div>
+        </div>
+
+        <div class="canvas-container" style="margin-top: 14px;">
           <canvas id="main-timeseries-canvas"></canvas>
         </div>
         <div class="chart-legend" id="main-legend"></div>
@@ -1159,7 +1537,7 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
 
     <!-- Detailed Sample Table -->
     <div class="section-title">
-      <span>Periodic Sample Breakdown & Change Log (Active Region)</span>
+      <span id="sample-table-title">Periodic Sample Breakdown & Change Log</span>
       <span style="font-size: 0.8rem; color: var(--text-muted);" id="sample-count-badge">0 Samples</span>
     </div>
     <div class="table-card">
@@ -1167,7 +1545,9 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
         <thead>
           <tr>
             <th>#</th>
-            <th>Elapsed Time</th>
+            <th>Region</th>
+            <th>Global Time</th>
+            <th>Region Time</th>
             <th>Duration</th>
             <th class="text-right">Power (W)</th>
             <th class="text-right">Δ Power</th>
@@ -1194,6 +1574,7 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
     // Application State - Default to White/Light Theme
     let currentRunIdx = 0;
     let currentRegionKey = "";
+    let currentViewScope = "continuous"; // "continuous" (all regions chained) or "single"
     let currentViewMode = "levels";
     let activePmuMetric = "ipc";
     let activeCompMetric = "energy";
@@ -1208,7 +1589,10 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
     const kpiContainer = document.getElementById("kpi-container");
     const sampleTableBody = document.getElementById("sample-table-body");
     const sampleCountBadge = document.getElementById("sample-count-badge");
+    const sampleTableTitle = document.getElementById("sample-table-title");
     const tooltip = document.getElementById("chart-tooltip");
+    const btnScopeContinuous = document.getElementById("btn-scope-continuous");
+    const btnScopeSingle = document.getElementById("btn-scope-single");
 
     // Smart number formatter for metrics and tooltips
     function formatNumber(val, decimals) {
@@ -1228,6 +1612,7 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
     // Helper to extract metric, derived, or event value safely from plain JSON sample object
     function getSampleVal(sample, key) {
       if (!sample) return null;
+      if (key === "power_w" && sample.power_w !== undefined) return sample.power_w;
       if (sample.metrics && sample.metrics[key] !== undefined) return sample.metrics[key];
       if (sample.derived && sample.derived[key] !== undefined) return sample.derived[key];
       if (sample.events && sample.events[key] !== undefined) return sample.events[key];
@@ -1236,17 +1621,24 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
 
     // Attach .get_val helper to all samples in RUNS_DATA for backwards compatibility
     RUNS_DATA.forEach(run => {
-      if (!run || !run.regions) return;
-      Object.values(run.regions).forEach(reg => {
-        if (reg.pmu_samples) {
-          reg.pmu_samples.forEach(s => {
-            s.get_val = function(k) { return getSampleVal(this, k); };
-          });
-        }
-        if (reg.pmu_aggregate) {
-          reg.pmu_aggregate.get_val = function(k) { return getSampleVal(this, k); };
-        }
-      });
+      if (!run) return;
+      if (run.regions) {
+        Object.values(run.regions).forEach(reg => {
+          if (reg.pmu_samples) {
+            reg.pmu_samples.forEach(s => {
+              s.get_val = function(k) { return getSampleVal(this, k); };
+            });
+          }
+          if (reg.pmu_aggregate) {
+            reg.pmu_aggregate.get_val = function(k) { return getSampleVal(this, k); };
+          }
+        });
+      }
+      if (run.continuous_sequence && run.continuous_sequence.samples) {
+        run.continuous_sequence.samples.forEach(s => {
+          s.get_val = function(k) { return getSampleVal(this, k); };
+        });
+      }
     });
 
     // Initialize Selectors
@@ -1260,6 +1652,13 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
         runSelect.appendChild(opt);
       });
 
+      const initialRun = RUNS_DATA[currentRunIdx];
+      if (initialRun && initialRun.continuous_sequence && initialRun.continuous_sequence.segments.length > 1) {
+        currentViewScope = "continuous";
+      } else {
+        currentViewScope = "single";
+      }
+
       updateRegionOptions();
     }
 
@@ -1269,17 +1668,28 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
       if (!run || !run.regions) return;
 
       const keys = Object.keys(run.regions);
+
+      // Add "All Regions (Continuous Program Sequence)" option
+      const allOpt = document.createElement("option");
+      allOpt.value = "__ALL_CONTINUOUS__";
+      allOpt.textContent = `🌐 All Regions (Continuous Program Sequence) [${keys.length} regions]`;
+      regionSelect.appendChild(allOpt);
+
       keys.forEach((key, idx) => {
         const opt = document.createElement("option");
         opt.value = key;
-        const cfg = run.regions[key].config;
-        const detail = (cfg && cfg.threads) ? " [" + cfg.threads + " thr, " + cfg.sched + "]" : "";
-        opt.textContent = key + detail;
+        const reg = run.regions[key];
+        const cfg = reg ? reg.config : {};
+        const dur = reg && reg.energy_profile ? " (" + (reg.energy_profile.duration_ms / 1000.0).toFixed(1) + "s)" : "";
+        const detail = (cfg && cfg.threads) ? " [" + cfg.threads + " thr, " + (cfg.sched || "static") + dur + "]" : "";
+        opt.textContent = (idx + 1) + ". " + key + detail;
         regionSelect.appendChild(opt);
       });
 
-      if (keys.length > 0) {
-        if (!keys.includes(currentRegionKey)) {
+      if (currentViewScope === "continuous") {
+        regionSelect.value = "__ALL_CONTINUOUS__";
+      } else {
+        if (!keys.includes(currentRegionKey) && keys.length > 0) {
           currentRegionKey = keys[0];
         }
         regionSelect.value = currentRegionKey;
@@ -1298,6 +1708,8 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
         this.rightYLabel = "";
         this.isCategorical = false;
         this.forceZero = false;
+        this.regionSegments = [];
+        this.sampleMeta = [];
         this.padding = { top: 32, right: 65, bottom: 44, left: 65 };
         this.displayW = 600;
         this.displayH = 320;
@@ -1341,6 +1753,8 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
         this.rightYLabel = rightYLabel || "";
         this.isCategorical = Boolean(options.isCategorical);
         this.forceZero = Boolean(options.forceZero);
+        this.regionSegments = options.regionSegments || [];
+        this.sampleMeta = options.sampleMeta || [];
         this.hoverIdx = null;
         this.hoverX = null;
         this.handleResize();
@@ -1518,7 +1932,6 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
               const topY = Math.min(yVal, zeroY);
               const barH = Math.max(Math.abs(yVal - zeroY), 2);
 
-              // Use positive/negative color if delta bar
               let fill = s.color;
               if (s.dynamicDeltaColor) {
                 fill = val >= 0 ? (isDark ? "#4ade80" : "#16a34a") : (isDark ? "#fb7185" : "#e11d48");
@@ -1528,7 +1941,6 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
               ctx.rect(xLeft, topY, barW, barH);
               ctx.fill();
 
-              // Print value label on bar if slot is wide enough
               if (slotW >= 40 && barH > 14) {
                 ctx.fillStyle = isDark ? "#ffffff" : (val >= 0 ? "#16a34a" : "#e11d48");
                 ctx.font = "bold 10px sans-serif";
@@ -1544,6 +1956,47 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
           const xMax = Math.max(...this.xAxis);
           const xSpan = Math.max(xMax - xMin, 1e-6);
           const getXPixel = (x) => p.left + ((x - xMin) / xSpan) * chartW;
+
+          // 1. Draw Region Segment background bands, boundaries, and headers if present
+          if (this.regionSegments && this.regionSegments.length > 0) {
+            this.regionSegments.forEach((seg, sIdx) => {
+              const x1 = Math.max(p.left, getXPixel(seg.start_time_s));
+              const x2 = Math.min(p.left + chartW, getXPixel(seg.end_time_s));
+              const segW = Math.max(x2 - x1, 0);
+
+              // Alternating subtle tint
+              if (sIdx % 2 === 1 && segW > 0) {
+                ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.02)" : "rgba(2, 132, 199, 0.035)";
+                ctx.fillRect(x1, p.top, segW, chartH);
+              }
+
+              // Boundary dashed vertical divider line between regions
+              if (sIdx > 0 && x1 >= p.left && x1 <= p.left + chartW) {
+                ctx.save();
+                ctx.strokeStyle = isDark ? "rgba(148, 163, 184, 0.5)" : "rgba(100, 116, 139, 0.4)";
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(x1, p.top);
+                ctx.lineTo(x1, p.top + chartH);
+                ctx.stroke();
+                ctx.restore();
+              }
+
+              // Region header label at top
+              if (segW >= 50) {
+                ctx.save();
+                const midX = x1 + segW / 2;
+                let regLabel = seg.region_name;
+                if (regLabel.length > 18 && segW < 130) regLabel = regLabel.substring(0, 15) + "…";
+                ctx.font = "bold 10px sans-serif";
+                ctx.fillStyle = isDark ? "#38bdf8" : "#0284c7";
+                ctx.textAlign = "center";
+                ctx.fillText(seg.region_index + ". " + regLabel + " (" + seg.duration_s.toFixed(1) + "s)", midX, p.top + 14);
+                ctx.restore();
+              }
+            });
+          }
 
           // X Axis Ticks
           ctx.fillStyle = textColor;
@@ -1659,15 +2112,21 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
         this.hoverX = hoverXPos;
         this.render();
 
-        // Show Tooltip
+        // Show Tooltip with region metadata if available
         let title = "";
-        if (this.isCategorical) {
+        let sub = "";
+        const meta = (this.sampleMeta && this.sampleMeta[nearestIdx]) ? this.sampleMeta[nearestIdx] : null;
+
+        if (meta) {
+          title = `[#${meta.regionIdx || 1} ${meta.regionName}] Sample #${meta.regionSampleIdx || (nearestIdx + 1)}`;
+          sub = `<div class='tt-sub' style='font-size:0.7rem; color:var(--text-muted); margin-bottom:4px;'>Program: <strong>${meta.globalTime.toFixed(2)}s</strong> | Region: <strong>${meta.regionTime.toFixed(2)}s</strong></div>`;
+        } else if (this.isCategorical) {
           title = String(this.xAxis[nearestIdx]);
         } else {
           title = "Sample #" + (nearestIdx + 1) + " (t = " + Number(this.xAxis[nearestIdx]).toFixed(3) + "s)";
         }
 
-        let html = "<div class='tt-title'>" + title + "</div>";
+        let html = "<div class='tt-title'>" + title + "</div>" + sub;
         this.series.forEach(s => {
           const val = s.data[nearestIdx];
           const valStr = val !== null && val !== undefined && !isNaN(val) ? formatNumber(val, s.decimals) : "N/A";
@@ -1709,14 +2168,284 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
       const run = RUNS_DATA[currentRunIdx];
       if (!run || !run.regions) return;
 
-      const reg = run.regions[currentRegionKey];
-      if (!reg) return;
+      updateScopeButtons();
+      renderSequenceRibbon(run);
 
-      updateKpis(reg);
-      updateMainChart(reg);
+      if (currentViewScope === "continuous" && run.continuous_sequence && run.continuous_sequence.samples && run.continuous_sequence.samples.length > 0) {
+        updateContinuousKpis(run);
+        updateContinuousMainChart(run);
+        updateContinuousTable(run);
+      } else {
+        const reg = run.regions[currentRegionKey] || Object.values(run.regions)[0];
+        if (reg) {
+          updateKpis(reg);
+          updateMainChart(reg);
+          updateTable(reg);
+        }
+      }
+
       updateRegionComparisonChart(run);
       updateRegionComparisonTable(run);
-      updateTable(reg);
+    }
+
+    function updateScopeButtons() {
+      if (btnScopeContinuous && btnScopeSingle) {
+        btnScopeContinuous.classList.toggle("active", currentViewScope === "continuous");
+        btnScopeSingle.classList.toggle("active", currentViewScope === "single");
+      }
+    }
+
+    function renderSequenceRibbon(run) {
+      const ribbonContainer = document.getElementById("sequence-ribbon-container");
+      const ribbon = document.getElementById("sequence-ribbon");
+      const summaryEl = document.getElementById("sequence-ribbon-summary");
+      if (!ribbon || !ribbonContainer) return;
+
+      const cs = run.continuous_sequence;
+      if (!cs || !cs.segments || cs.segments.length === 0) {
+        ribbonContainer.style.display = "none";
+        return;
+      }
+
+      ribbonContainer.style.display = "flex";
+      summaryEl.textContent = `${cs.segments.length} parallel regions • Total: ${cs.total_duration_s.toFixed(2)}s • ${cs.total_energy_j.toFixed(1)} J`;
+      ribbon.innerHTML = "";
+
+      cs.segments.forEach(seg => {
+        const card = document.createElement("div");
+        card.className = "sequence-card";
+        if (currentViewScope === "single" && currentRegionKey === seg.region_name) {
+          card.classList.add("active");
+        }
+        card.title = `Click to zoom into ${seg.region_name} (${seg.duration_s.toFixed(2)}s, ${seg.total_energy_j.toFixed(1)}J)`;
+
+        const timeStr = seg.file_time_str ? `🕒 ${seg.file_time_str}` : `⏱ ${seg.duration_s.toFixed(2)}s`;
+        card.innerHTML = `
+          <div class="sequence-card-title">
+            <span style="font-weight:700;">#${seg.region_index}. ${seg.region_name}</span>
+            <span class="sequence-badge">${seg.duration_s.toFixed(1)}s</span>
+          </div>
+          <div class="sequence-card-metrics">
+            <div>⚡ <strong>${seg.total_energy_j.toFixed(1)} J</strong></div>
+            <div>🔌 <strong>${seg.avg_power_w.toFixed(1)} W</strong></div>
+            <div>🚀 IPC <strong>${seg.avg_ipc.toFixed(2)}</strong></div>
+            <div>🧵 <strong>${seg.threads || 1} thr</strong></div>
+          </div>
+          <div class="sequence-card-meta">
+            <span>${timeStr}</span>
+            <span>t = ${seg.start_time_s.toFixed(1)}s → ${seg.end_time_s.toFixed(1)}s</span>
+          </div>
+        `;
+
+        card.addEventListener("click", () => {
+          currentViewScope = "single";
+          currentRegionKey = seg.region_name;
+          regionSelect.value = seg.region_name;
+          refreshDashboard();
+        });
+
+        ribbon.appendChild(card);
+      });
+    }
+
+    function updateContinuousKpis(run) {
+      kpiContainer.innerHTML = "";
+      const cs = run.continuous_sequence;
+      if (!cs) return;
+
+      const dur = cs.total_duration_s;
+      const energyJ = cs.total_energy_j;
+      const powerW = cs.avg_power_w;
+      const edp = cs.edp_js;
+      const segCount = cs.segments ? cs.segments.length : 0;
+      const sampleCount = cs.samples ? cs.samples.length : 0;
+
+      let totalIpc = 0, countIpc = 0;
+      let totalL2 = 0, countL2 = 0;
+      let totalL3 = 0, countL3 = 0;
+      cs.samples.forEach(s => {
+        const ipc = getSampleVal(s, "ipc");
+        if (ipc !== null && !isNaN(ipc)) { totalIpc += ipc; countIpc++; }
+        const l2 = getSampleVal(s, "l2_hit_ratio");
+        if (l2 !== null && !isNaN(l2)) { totalL2 += l2; countL2++; }
+        const l3 = getSampleVal(s, "l3_mpki");
+        if (l3 !== null && !isNaN(l3)) { totalL3 += l3; countL3++; }
+      });
+      const avgIpc = countIpc > 0 ? (totalIpc / countIpc) : 0;
+      const avgL2 = countL2 > 0 ? (totalL2 / countL2) : 0;
+      const avgL3 = countL3 > 0 ? (totalL3 / countL3) : 0;
+
+      const cards = [
+        { title: "Program Total Energy", value: energyJ.toFixed(1) + " J", sub: (energyJ / 3600.0).toFixed(4) + " Wh (" + segCount + " Parallel Regions)", accent: "var(--accent-amber)" },
+        { title: "Program Avg Power", value: powerW.toFixed(1) + " W", sub: "Combined Execution Sockets", accent: "var(--accent-rose)" },
+        { title: "Total Execution Duration", value: dur.toFixed(2) + " s", sub: sampleCount + " Samples across " + segCount + " Regions", accent: "var(--accent-blue)" },
+        { title: "Program EDP", value: edp.toFixed(1) + " J·s", sub: "Total Energy-Delay Product", accent: "var(--accent-purple)" },
+        { title: "Program Overall IPC", value: avgIpc.toFixed(2), sub: "Across All Chained Regions", accent: "var(--accent-green)" },
+        { title: "Program Avg L2 Hit %", value: avgL2.toFixed(1) + "%", sub: "Avg L3 MPKI: " + avgL3.toFixed(4), accent: "var(--accent-blue)" },
+      ];
+
+      cards.forEach(c => {
+        const el = document.createElement("div");
+        el.className = "kpi-card";
+        el.style.setProperty("--card-accent", c.accent);
+        el.innerHTML = `
+          <div class="kpi-title">${c.title}</div>
+          <div class="kpi-value">${c.value}</div>
+          <div class="kpi-sub">${c.sub}</div>
+        `;
+        kpiContainer.appendChild(el);
+      });
+    }
+
+    function updateContinuousMainChart(run) {
+      const cs = run.continuous_sequence;
+      const titleEl = document.getElementById("main-chart-title");
+      const descEl = document.getElementById("main-chart-desc");
+
+      if (titleEl) {
+        titleEl.textContent = "Energy Consumption, Power (W) & PMU Performance Progression (Continuous Program Sequence)";
+      }
+      if (descEl) {
+        descEl.textContent = "Continuous execution progression across all " + (cs ? cs.segments.length : 0) + " parallel regions ordered by file creation time (program sequence)";
+      }
+
+      if (!cs || !cs.samples || cs.samples.length === 0) {
+        mainChart.setData([], [], "", "");
+        return;
+      }
+
+      const times = cs.samples.map(s => s.global_mid_time_s);
+      const mode = currentViewMode;
+      const mcPmu = cs.metric_changes[activePmuMetric];
+      const mcPow = cs.metric_changes["power_w"];
+
+      let pmuData = [];
+      let powData = [];
+
+      if (mode === "levels") {
+        pmuData = cs.samples.map(s => getSampleVal(s, activePmuMetric));
+        powData = mcPow ? mcPow.values : [];
+      } else if (mode === "deltas") {
+        pmuData = mcPmu ? mcPmu.deltas : [];
+        powData = mcPow ? mcPow.deltas : [];
+      } else if (mode === "rate_of_change") {
+        pmuData = mcPmu ? mcPmu.rates_of_change : [];
+        powData = mcPow ? mcPow.rates_of_change : [];
+      } else if (mode === "pct_change") {
+        pmuData = mcPmu ? mcPmu.pct_changes : [];
+        powData = mcPow ? mcPow.pct_changes : [];
+      }
+
+      const pmuLabels = {
+        ipc: "IPC",
+        freq_ghz: "Core Freq (GHz)",
+        l2_hit_ratio: "L2 Hit %",
+        l3_mpki: "L3 MPKI"
+      };
+
+      const powColor = isDark ? "#fb7185" : "#e11d48";
+      const pmuColor = isDark ? "#38bdf8" : "#0284c7";
+
+      const series = [
+        {
+          name: "Power (W)" + (mode !== "levels" ? " [" + mode + "]" : ""),
+          data: powData,
+          color: powColor,
+          fillArea: mode === "levels",
+          useRightAxis: false,
+          decimals: 1
+        },
+        {
+          name: (pmuLabels[activePmuMetric] || activePmuMetric) + (mode !== "levels" ? " [" + mode + "]" : ""),
+          data: pmuData,
+          color: pmuColor,
+          useRightAxis: true,
+          decimals: 3
+        }
+      ];
+
+      const sampleMeta = cs.samples.map(s => ({
+        regionName: s.region_name,
+        regionIdx: s.region_idx,
+        regionSampleIdx: s.region_sample_idx,
+        regionTime: s.region_mid_time_s,
+        globalTime: s.global_mid_time_s,
+        durationMs: s.duration_ms
+      }));
+
+      mainChart.setData(times, series, "Power (Watts)", pmuLabels[activePmuMetric] || activePmuMetric, {
+        isCategorical: false,
+        forceZero: mode !== "levels",
+        regionSegments: cs.segments,
+        sampleMeta: sampleMeta
+      });
+
+      // Update Legend
+      const legendEl = document.getElementById("main-legend");
+      legendEl.innerHTML = `
+        <div class="legend-item"><div class="legend-color" style="background:${powColor}"></div><span>Power (Watts) - Left Y</span></div>
+        <div class="legend-item"><div class="legend-color" style="background:${pmuColor}"></div><span>${pmuLabels[activePmuMetric] || activePmuMetric} - Right Y</span></div>
+        <div class="legend-item"><div style="width:18px; border-top:2px dashed ${isDark ? '#94a3b8' : '#64748b'}; margin-top:2px;"></div><span>Region Transition Boundary</span></div>
+      `;
+    }
+
+    function updateContinuousTable(run) {
+      sampleTableBody.innerHTML = "";
+      const cs = run.continuous_sequence;
+      if (!cs || !cs.samples) return;
+
+      if (sampleTableTitle) {
+        sampleTableTitle.textContent = "Periodic Sample Breakdown & Change Log (Continuous Program Sequence)";
+      }
+      sampleCountBadge.textContent = `${cs.samples.length} Samples across ${cs.segments.length} Regions`;
+
+      const ipcMc = cs.metric_changes["ipc"];
+      const powMc = cs.metric_changes["power_w"];
+
+      cs.samples.forEach((sample, i) => {
+        const tr = document.createElement("tr");
+
+        const ipcV = getSampleVal(sample, "ipc") || 0;
+        const ipcD = ipcMc ? ipcMc.deltas[i] : 0;
+        const ipcDStr = i > 0 ? (ipcD >= 0 ? "+" : "") + ipcD.toFixed(3) : "-";
+        const ipcDClass = ipcD > 0 ? "positive-change" : (ipcD < 0 ? "negative-change" : "");
+
+        const powV = sample.power_w || (powMc && powMc.values[i] ? powMc.values[i] : 0);
+        const powD = powMc && powMc.deltas[i] ? powMc.deltas[i] : 0;
+        const powDStr = i > 0 ? (powD >= 0 ? "+" : "") + powD.toFixed(1) : "-";
+        const powDClass = powD < 0 ? "positive-change" : (powD > 0 ? "negative-change" : "");
+
+        const freqV = (getSampleVal(sample, "freq_ghz") || 0).toFixed(2);
+        const l2Hit = (getSampleVal(sample, "l2_hit_ratio") || 0).toFixed(1) + "%";
+        const l3Mpki = (getSampleVal(sample, "l3_mpki") || 0).toFixed(4);
+        const brMisp = ((getSampleVal(sample, "branch_mispr_ratio") || 0) * 100).toFixed(2) + "%";
+
+        tr.innerHTML = `
+          <td><strong>${sample.global_idx}</strong></td>
+          <td><span class="region-tag" title="Click to view region ${sample.region_name}">${sample.region_name}</span></td>
+          <td>${sample.global_mid_time_s.toFixed(3)}s</td>
+          <td>${sample.region_mid_time_s.toFixed(3)}s</td>
+          <td>${sample.duration_ms.toFixed(1)}ms</td>
+          <td class="text-right">${powV.toFixed(1)} W</td>
+          <td class="text-right ${powDClass}">${powDStr}</td>
+          <td class="text-right font-bold">${ipcV.toFixed(3)}</td>
+          <td class="text-right ${ipcDClass}">${ipcDStr}</td>
+          <td class="text-right">${freqV}</td>
+          <td class="text-right">${l2Hit}</td>
+          <td class="text-right">${l3Mpki}</td>
+          <td class="text-right">${brMisp}</td>
+        `;
+
+        tr.querySelector(".region-tag").addEventListener("click", (e) => {
+          e.stopPropagation();
+          currentViewScope = "single";
+          currentRegionKey = sample.region_name;
+          regionSelect.value = sample.region_name;
+          refreshDashboard();
+        });
+
+        sampleTableBody.appendChild(tr);
+      });
     }
 
     function updateKpis(reg) {
@@ -1754,6 +2483,16 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
     }
 
     function updateMainChart(reg) {
+      const titleEl = document.getElementById("main-chart-title");
+      const descEl = document.getElementById("main-chart-desc");
+
+      if (titleEl) {
+        titleEl.textContent = "Energy Consumption, Power (W) & PMU Performance Progression — " + reg.name;
+      }
+      if (descEl) {
+        descEl.textContent = "Tracks power and PMU metric fluctuations across elapsed region time (1s periodic interval sampling)";
+      }
+
       if (!reg.pmu_samples || reg.pmu_samples.length === 0) {
         mainChart.setData([], [], "", "");
         return;
@@ -1811,7 +2550,9 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
 
       mainChart.setData(times, series, "Power (Watts)", pmuLabels[activePmuMetric] || activePmuMetric, {
         isCategorical: false,
-        forceZero: mode !== "levels"
+        forceZero: mode !== "levels",
+        regionSegments: [],
+        sampleMeta: []
       });
 
       // Update Legend
@@ -1891,14 +2632,14 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
         const l3Mpki = pa ? (getSampleVal(pa, "l3_mpki") || 0) : 0;
         const brMisp = pa ? (getSampleVal(pa, "branch_mispr_ratio") || 0) : 0;
 
-        const isSelected = key === currentRegionKey;
+        const isSelected = (currentViewScope === "single" && key === currentRegionKey);
         const tr = document.createElement("tr");
         if (isSelected) tr.style.backgroundColor = isDark ? "rgba(56, 189, 248, 0.12)" : "rgba(2, 132, 199, 0.08)";
         tr.style.cursor = "pointer";
         tr.title = "Click to inspect this region in time-series detail";
 
         tr.innerHTML = `
-          <td><strong>${key}</strong>${isSelected ? " <span style='color:var(--accent-blue);font-size:0.75rem;'>(Active)</span>" : ""}</td>
+          <td><strong>${idx + 1}. ${key}</strong>${isSelected ? " <span style='color:var(--accent-blue);font-size:0.75rem;'>(Active)</span>" : ""}</td>
           <td>${cfg.threads || "-"}</td>
           <td>${cfg.sched ? cfg.sched + "," + cfg.chunk : "-"}</td>
           <td class="text-right">${dur.toFixed(2)}s</td>
@@ -1913,6 +2654,7 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
         `;
 
         tr.addEventListener("click", () => {
+          currentViewScope = "single";
           currentRegionKey = key;
           regionSelect.value = key;
           refreshDashboard();
@@ -1926,6 +2668,9 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
       sampleTableBody.innerHTML = "";
       if (!reg.pmu_samples) return;
 
+      if (sampleTableTitle) {
+        sampleTableTitle.textContent = "Periodic Sample Breakdown & Change Log (" + reg.name + ")";
+      }
       sampleCountBadge.textContent = reg.pmu_samples.length + " Samples";
 
       const ipcMc = reg.metric_changes["ipc"];
@@ -1951,6 +2696,8 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
 
         tr.innerHTML = `
           <td>${sample.sample_idx}</td>
+          <td><span class="region-tag">${reg.name}</span></td>
+          <td>${sample.mid_time_s.toFixed(3)}s</td>
           <td>${sample.mid_time_s.toFixed(3)}s</td>
           <td>${sample.duration_ms.toFixed(1)}ms</td>
           <td class="text-right">${powV.toFixed(1)} W</td>
@@ -1966,10 +2713,46 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
       });
     }
 
-    // Export CSV of currently active region
+    // Export CSV of currently active region or continuous program sequence
     function exportCsv() {
       const run = RUNS_DATA[currentRunIdx];
-      const reg = run ? run.regions[currentRegionKey] : null;
+      if (!run) return;
+
+      if (currentViewScope === "continuous" && run.continuous_sequence && run.continuous_sequence.samples && run.continuous_sequence.samples.length > 0) {
+        const cs = run.continuous_sequence;
+        let csvContent = "data:text/csv;charset=utf-8,";
+        csvContent += "global_idx,region_name,region_sample_idx,global_time_s,region_time_s,duration_ms,power_w,ipc,freq_ghz,l2_hit_pct,l3_mpki,branch_mispr_pct\\n";
+
+        cs.samples.forEach((s) => {
+          const row = [
+            s.global_idx,
+            s.region_name,
+            s.region_sample_idx,
+            s.global_mid_time_s.toFixed(4),
+            s.region_mid_time_s.toFixed(4),
+            s.duration_ms.toFixed(2),
+            (s.power_w || 0).toFixed(2),
+            (getSampleVal(s, "ipc") || 0).toFixed(4),
+            (getSampleVal(s, "freq_ghz") || 0).toFixed(4),
+            (getSampleVal(s, "l2_hit_ratio") || 0).toFixed(2),
+            (getSampleVal(s, "l3_mpki") || 0).toFixed(6),
+            ((getSampleVal(s, "branch_mispr_ratio") || 0) * 100).toFixed(4)
+          ];
+          csvContent += row.join(",") + "\\n";
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", (run.folder_name || "orbit_run") + "__continuous_program_sequence.csv");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+      }
+
+      // Single region export
+      const reg = run.regions[currentRegionKey];
       if (!reg || !reg.pmu_samples) return;
 
       let csvContent = "data:text/csv;charset=utf-8,";
@@ -2003,14 +2786,44 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
     // Event Listeners
     runSelect.addEventListener("change", (e) => {
       currentRunIdx = parseInt(e.target.value, 10);
+      const curRun = RUNS_DATA[currentRunIdx];
+      if (curRun && curRun.continuous_sequence && curRun.continuous_sequence.segments.length > 1) {
+        currentViewScope = "continuous";
+      }
       updateRegionOptions();
       refreshDashboard();
     });
 
     regionSelect.addEventListener("change", (e) => {
-      currentRegionKey = e.target.value;
+      if (e.target.value === "__ALL_CONTINUOUS__") {
+        currentViewScope = "continuous";
+      } else {
+        currentViewScope = "single";
+        currentRegionKey = e.target.value;
+      }
       refreshDashboard();
     });
+
+    if (btnScopeContinuous) {
+      btnScopeContinuous.addEventListener("click", () => {
+        currentViewScope = "continuous";
+        regionSelect.value = "__ALL_CONTINUOUS__";
+        refreshDashboard();
+      });
+    }
+
+    if (btnScopeSingle) {
+      btnScopeSingle.addEventListener("click", () => {
+        currentViewScope = "single";
+        if (regionSelect.value === "__ALL_CONTINUOUS__") {
+          const run = RUNS_DATA[currentRunIdx];
+          const keys = run && run.regions ? Object.keys(run.regions) : [];
+          if (keys.length > 0) currentRegionKey = keys[0];
+          regionSelect.value = currentRegionKey;
+        }
+        refreshDashboard();
+      });
+    }
 
     viewModeSelect.addEventListener("change", (e) => {
       currentViewMode = e.target.value;
@@ -2071,7 +2884,8 @@ def generate_html_dashboard(runs: List[RunData], output_path: str) -> str:
 # ==============================================================================
 
 def _generate_svg_line_chart(times: List[float], series: List[Dict[str, Any]],
-                             left_label: str, right_label: str, title: str) -> str:
+                             left_label: str, right_label: str, title: str,
+                             region_segments: Optional[List[Dict[str, Any]]] = None) -> str:
     """Generate clean, standalone vector SVG dual-axis time-series chart in white theme."""
     width = 900
     height = 450
@@ -2129,6 +2943,23 @@ def _generate_svg_line_chart(times: List[float], series: List[Dict[str, Any]],
         f'<text x="{width/2}" y="28" fill="#0f172a" font-size="16" font-weight="bold" text-anchor="middle">{title}</text>',
     ]
 
+    # Region segments alternating background and boundaries
+    if region_segments:
+        for s_idx, seg in enumerate(region_segments):
+            x1 = max(margin["left"], x_px(seg["start_time_s"]))
+            x2 = min(margin["left"] + plot_w, x_px(seg["end_time_s"]))
+            seg_w = max(x2 - x1, 0)
+            if s_idx % 2 == 1 and seg_w > 0:
+                svg.append(f'<rect x="{x1:.1f}" y="{margin["top"]}" width="{seg_w:.1f}" height="{plot_h}" fill="rgba(2, 132, 199, 0.04)"/>')
+            if s_idx > 0 and margin["left"] < x1 < margin["left"] + plot_w:
+                svg.append(f'<line x1="{x1:.1f}" y1="{margin["top"]}" x2="{x1:.1f}" y2="{margin["top"] + plot_h}" stroke="#94a3b8" stroke-dasharray="4,4" stroke-width="1.5"/>')
+            if seg_w >= 50:
+                mid_x = x1 + seg_w / 2.0
+                r_name = seg["region_name"]
+                if len(r_name) > 16:
+                    r_name = r_name[:14] + "…"
+                svg.append(f'<text x="{mid_x:.1f}" y="{margin["top"] + 14}" fill="#0284c7" font-size="10" font-weight="bold" text-anchor="middle">{seg.get("region_index", s_idx+1)}. {r_name} ({seg.get("duration_s", 0):.1f}s)</text>')
+
     # Grid lines & ticks
     grid_steps = 5
     for i in range(grid_steps + 1):
@@ -2181,6 +3012,10 @@ def _generate_svg_line_chart(times: List[float], series: List[Dict[str, Any]],
         svg.append(f'<rect x="{leg_x}" y="{leg_y - 10}" width="12" height="12" rx="2" fill="{color}"/>')
         svg.append(f'<text x="{leg_x + 18}" y="{leg_y}" fill="#0f172a" font-size="12">{name}</text>')
         leg_x += len(name) * 8 + 40
+
+    if region_segments and len(region_segments) > 1:
+        svg.append(f'<line x1="{leg_x}" y1="{leg_y - 4}" x2="{leg_x + 16}" y2="{leg_y - 4}" stroke="#94a3b8" stroke-dasharray="3,3" stroke-width="1.5"/>')
+        svg.append(f'<text x="{leg_x + 22}" y="{leg_y}" fill="#0f172a" font-size="12">Region Boundary</text>')
 
     svg.append('</svg>')
     return "\n".join(svg)
@@ -2272,6 +3107,62 @@ def export_static_plots(runs: List[RunData], export_dir: str) -> List[str]:
             with open(comp_svg_path, "w", encoding="utf-8") as f:
                 f.write(comp_svg)
             generated.append(comp_svg_path)
+
+        # Continuous Program Sequence (All Parallel Regions)
+        if run.continuous_sequence and run.continuous_sequence.samples and len(run.regions) > 1:
+            cs = run.continuous_sequence
+            times = [s.global_mid_time_s for s in cs.samples]
+            ipc_vals = [s.get_val("ipc") for s in cs.samples]
+            pow_mc = cs.metric_changes.get("power_w")
+            pow_vals = pow_mc.values if pow_mc else [s.power_w for s in cs.samples]
+            segments = [seg.to_dict() for seg in cs.segments]
+
+            series = [
+                {"name": "Power (Watts)", "data": pow_vals, "color": "#e11d48", "use_right": False},
+                {"name": "IPC", "data": ipc_vals, "color": "#0284c7", "use_right": True},
+            ]
+            title = f"{run.folder_name} - Continuous Program Sequence (All Parallel Regions)"
+            svg_content = _generate_svg_line_chart(times, series, "Power (Watts)", "IPC", title, region_segments=segments)
+            svg_path = os.path.join(export_dir, f"{run.folder_name}__continuous_program_sequence.svg")
+            with open(svg_path, "w", encoding="utf-8") as f:
+                f.write(svg_content)
+            generated.append(svg_path)
+
+            if mpl_available:
+                try:
+                    fig, ax1 = plt.subplots(figsize=(12, 5), facecolor="#ffffff")
+                    ax1.set_facecolor("#ffffff")
+                    ax1.set_title(title, color="#0f172a", fontsize=14, pad=12, fontweight="bold")
+                    ax1.set_xlabel("Time (s)", color="#334155")
+                    ax1.set_ylabel("Power (Watts)", color="#e11d48")
+                    ax1.plot(times, pow_vals, color="#e11d48", marker="o", linewidth=2, label="Power (W)")
+                    ax1.tick_params(colors="#64748b")
+                    for spine in ax1.spines.values():
+                        spine.set_color("#cbd5e1")
+                    ax1.grid(True, color="#f1f5f9", linestyle="--", alpha=0.8)
+
+                    # Region boundary vertical lines & labels
+                    for seg in segments:
+                        if seg["start_time_s"] > 0:
+                            ax1.axvline(x=seg["start_time_s"], color="#94a3b8", linestyle="--", alpha=0.7)
+                        mid_x = (seg["start_time_s"] + seg["end_time_s"]) / 2.0
+                        ax1.text(mid_x, ax1.get_ylim()[1] * 0.95, f"{seg['region_index']}. {seg['region_name']}",
+                                 color="#0284c7", fontsize=9, fontweight="bold", ha="center")
+
+                    ax2 = ax1.twinx()
+                    ax2.set_ylabel("IPC", color="#0284c7")
+                    ax2.plot(times, ipc_vals, color="#0284c7", marker="s", linewidth=2, label="IPC")
+                    ax2.tick_params(colors="#64748b")
+                    for spine in ax2.spines.values():
+                        spine.set_color("#cbd5e1")
+
+                    png_path = os.path.join(export_dir, f"{run.folder_name}__continuous_program_sequence.png")
+                    fig.tight_layout()
+                    fig.savefig(png_path, dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
+                    plt.close(fig)
+                    generated.append(png_path)
+                except Exception as e:
+                    print(f"[Warning] Failed matplotlib PNG export for continuous sequence: {e}", file=sys.stderr)
 
         for reg_name, reg in run.regions.items():
             if not reg.pmu_samples:
