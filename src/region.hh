@@ -70,8 +70,8 @@ namespace orbit
                << "  \"function\": \"" << fn_buf << "\",\n"
                << "  \"entry\": \"" << (entry ? entry : "") << "\",\n"
                << "  \"threads\": " << threads << ",\n"
-               << "  \"sched\": \"" << sched_to_string(sched) << "\",\n"
                << "  \"chunk\": " << chunk << ",\n"
+               << "  \"sched\": \"" << sched_to_string(sched) << "\",\n"
                << "  \"frequency\": " << frequency << "\n"
                << "}\n";
             return ss.str();

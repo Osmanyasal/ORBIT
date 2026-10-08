@@ -60,6 +60,9 @@ On start ORBIT checks `ORBIT_OPTIMIZED_CONF` and picks its mode:
   `snapshot.conf` in the OPTKIT execution folder. Run the application several
   times, varying `OMP_NUM_THREADS`, `OMP_SCHEDULE` (schedule and chunk) and
   `ORBIT_CPU_FREQ` (MHz, or with a unit such as `2.4GHz`), to compare settings.
+  A region entered repeatedly (e.g. inside a time-step loop) is profiled on every entry; each entry is
+  appended as a new element of the region's single `*_cpu_pmu.json` / `*_cpu_energy.json` array, in
+  execution order.
 
 ```bash
 # snapshot analysis (ORBIT_OPTIMIZED_CONF unset)

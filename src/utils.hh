@@ -105,7 +105,10 @@ namespace orbit::utils
         omp_sched_t kind;
         int chunk;
         omp_get_schedule(&kind, &chunk);
-        return kind;
+        // libgomp may OR a monotonic/nonmonotonic modifier into the kind (e.g. 0x80000001 for "static,N"),
+        // which would not match any plain schedule kind.
+        constexpr unsigned modifier_bits = 0x80000000u | 0x40000000u;
+        return static_cast<omp_sched_t>(static_cast<unsigned>(kind) & ~modifier_bits);
     }
 
     inline long current_chunk()

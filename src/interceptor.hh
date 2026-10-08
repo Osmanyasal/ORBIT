@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
+#include <unistd.h>
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <exception>
@@ -40,7 +42,7 @@ namespace orbit
             std::int64_t frequency = 0;
         };
 
-        // Process-wide OPTKIT instance, created on first use and destroyed at exit.
+        // Process-wide OPTKIT instance, created on first use and destroyed at exit via atexit.
         // It initialises the logger and PMU query state the profilers rely on.
         inline std::unique_ptr<optkit::OPTKIT> &optkit_instance()
         {
@@ -75,6 +77,37 @@ namespace orbit
             // Optimize mode changes the frequency per region, so the original must always be restored.
             const bool restore_freq = !is_snapshot || runtime.frequency > 0;
             optkit_instance().reset(new optkit::OPTKIT{optkit::OPTKIT_CONFIG{is_snapshot, "", restore_freq}});
+
+            std::atexit([]() {
+                try
+                {
+                    optkit_instance().reset();
+                }
+                catch (...)
+                {
+                }
+            });
+
+            // Signal handler for Ctrl+C (SIGINT) and termination (SIGTERM)
+            static auto signal_handler = [](int sig) {
+                try
+                {
+                    optkit_instance().reset();
+                }
+                catch (...)
+                {
+                }
+                // Re-raise or exit with the signal code to preserve standard shell behavior
+                std::signal(sig, SIG_DFL);
+                ::kill(::getpid(), sig);
+            };
+
+            struct sigaction sa{};
+            sa.sa_handler = signal_handler;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            sigaction(SIGINT, &sa, nullptr);
+            sigaction(SIGTERM, &sa, nullptr);
 
             if (runtime.frequency > 0)
             {
@@ -139,8 +172,8 @@ namespace orbit
             else if (runtime.mode == detail::Mode::Snapshot)
             {
                 region.frequency = runtime.frequency;   // set the region frequency to the runtime frequency in snapshot mode
-                optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), true /*is_sampling*/};
-                perf_config.is_screenshot = true;
+                optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
+                // perf_config.is_screenshot = true;
 
                 auto metrics = optkit::metrics::performance::cpu_metrics::ipc();
                 metrics.add(optkit::metrics::performance::cpu_metrics::l2_hit_ratio());
@@ -149,7 +182,7 @@ namespace orbit
 
                 cpu_event_profiler.reset(new optkit::pmu::cpu::perf::BlockProfiler(perf_config, metrics));
                 cpu_energy_profiler.reset(new optkit::energy::rapl::Profiler(
-                    {region.name.c_str(), "cpu_energy", true, true, optkit::Query::create_folder, !optkit::Query::create_folder},
+                    {region.name.c_str(), "cpu_energy", true, false, optkit::Query::create_folder, !optkit::Query::create_folder},
                     optkit::metrics::energy::cpu_metrics::all_metrics()));
             }
             region_begin(region);

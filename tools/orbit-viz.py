@@ -788,7 +788,10 @@ def parse_pmu_json(filepath: str, threads: int = 1) -> Tuple[Optional[PmuSample]
     aggregate_sample: Optional[PmuSample] = None
     series_samples: List[PmuSample] = []
 
-    if len(parsed_samples) > 1:
+    # One element per region entry (repeatedly entered region): every reading is an entry, none is an aggregate.
+    entry_per_element = isinstance(root, list) and len(root) > 1
+
+    if len(parsed_samples) > 1 and not entry_per_element:
         first_dur = parsed_samples[0][0]
         rest_dur = sum(s[0] for s in parsed_samples[1:])
 
@@ -799,9 +802,11 @@ def parse_pmu_json(filepath: str, threads: int = 1) -> Tuple[Optional[PmuSample]
             slices = parsed_samples[1:]
         else:
             slices = parsed_samples
-    else:
+    elif len(parsed_samples) == 1:
         dur, ev, met = parsed_samples[0]
         aggregate_sample = PmuSample(0, dur, 0.0, dur / 1000.0, ev, met, threads=threads)
+        slices = parsed_samples
+    else:
         slices = parsed_samples
 
     current_time_s = 0.0
@@ -826,8 +831,19 @@ def parse_pmu_json(filepath: str, threads: int = 1) -> Tuple[Optional[PmuSample]
         for s in series_samples:
             for k, v in s.events.items():
                 tot_ev[k] = tot_ev.get(k, 0.0) + v
-        last_met = series_samples[-1].metrics.copy()
-        aggregate_sample = PmuSample(0, tot_dur, 0.0, tot_dur / 1000.0, tot_ev, last_met, threads=threads)
+        # Ratios are recomputed from the summed events by PmuSample; metrics that cannot be derived
+        # from events fall back to a duration-weighted mean.
+        aggregate_sample = PmuSample(0, tot_dur, 0.0, tot_dur / 1000.0, tot_ev, {}, threads=threads)
+        for s in series_samples:
+            for k in s.metrics:
+                if k in aggregate_sample.metrics:
+                    continue
+                weighted = [(x.metrics[k], x.duration_ms) for x in series_samples if k in x.metrics]
+                total_w = sum(w for _, w in weighted)
+                aggregate_sample.metrics[k] = (
+                    sum(v * w for v, w in weighted) / total_w if total_w > 0
+                    else sum(v for v, _ in weighted) / len(weighted)
+                )
 
     return aggregate_sample, series_samples
 
@@ -846,8 +862,8 @@ def parse_energy_json(filepath: str) -> Optional[EnergyProfile]:
     if not isinstance(root, list):
         return None
 
+    # A region entered repeatedly is stored as one element per entry: accumulate every entry per socket.
     sockets: Dict[int, EnergySocketData] = {}
-    max_duration_ms = 0.0
 
     for elem in root:
         if not isinstance(elem, dict):
@@ -864,7 +880,6 @@ def parse_energy_json(filepath: str) -> Optional[EnergyProfile]:
                 # Default to socket 0 if not specified
                 sock_num = 0
             dur_ms = to_float(r.get("duration")) or 0.0
-            max_duration_ms = max(max_duration_ms, dur_ms)
 
             energy_pkg = 0.0
             watt_hour = 0.0
@@ -890,7 +905,16 @@ def parse_energy_json(filepath: str) -> Optional[EnergyProfile]:
                     elif name == "kilo_edp_edp":
                         kilo_edp_edp = val
 
-            sock_data = EnergySocketData(
+            prev = sockets.get(sock_num)
+            if prev is not None:
+                dur_ms += prev.duration_ms
+                energy_pkg += prev.energy_pkg
+                watt_hour += prev.watt_hour
+                kilo_edp_pkg += prev.kilo_edp_pkg
+                kilo_edp_dram += prev.kilo_edp_dram
+                kilo_edp_edp += prev.kilo_edp_edp
+
+            sockets[sock_num] = EnergySocketData(
                 socket_id=sock_num,
                 duration_ms=dur_ms,
                 energy_pkg=energy_pkg,
@@ -899,12 +923,12 @@ def parse_energy_json(filepath: str) -> Optional[EnergyProfile]:
                 kilo_edp_dram=kilo_edp_dram,
                 kilo_edp_edp=kilo_edp_edp,
             )
-            sockets[sock_num] = sock_data
 
     if not sockets:
         return None
 
-    return EnergyProfile(duration_ms=max_duration_ms, sockets=sockets)
+    total_duration_ms = max(s.duration_ms for s in sockets.values())
+    return EnergyProfile(duration_ms=total_duration_ms, sockets=sockets)
 
 
 def load_run_directory(folder_path: str) -> Optional[RunData]:
