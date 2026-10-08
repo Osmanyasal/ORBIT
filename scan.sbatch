@@ -20,7 +20,8 @@
 # Overridable environment variables: ORBIT_ROOT, ORBIT_LIB, MIN_THREADS, CHUNK_LIST.
 
 # Program to sweep: the executable followed by its arguments (a relative path resolves against the submit directory).
-PROGRAM=(/home/yas0014/orbit/ORBIT/bin/Release/orbit_test)
+# PROGRAM=(/home/yas0014/orbit/ORBIT/bin/Release/orbit_test)
+PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/bt.C.x)
 
 set -u -o pipefail
 
@@ -32,11 +33,11 @@ if [[ ! -x "${SCAN}" ]]; then
     exit 1
 fi
 
-# sbatch starts the job in the submit directory, so a relative executable resolves against it.
-cd -- "${SLURM_SUBMIT_DIR:-${PWD}}" || exit 1
-
+# The sweep runs in the current directory: sbatch starts the job in the submit directory, and when the
+# script is run by hand (e.g. inside salloc) it uses the directory you are in.
+cd ${PWD}/..
 echo "Job ${SLURM_JOB_ID:-n/a} on $(hostname), $(nproc) CPUs, started $(date -Is)"
-echo "Submit dir: ${PWD}"
+echo "Working directory: ${PWD}"
 
 "${SCAN}" "${PROGRAM[@]}"
 status=$?

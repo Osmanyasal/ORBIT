@@ -128,7 +128,6 @@ for freq in "${FREQUENCIES[@]}"; do
                 if [[ "${threads}" == "1" && ( "${sched}" != "${SCHEDULES[0]}" || "${chunk}" != "${CHUNKS[0]}" ) ]]; then
                     continue
                 fi
-                exit 0
                 echo ""
                 echo ">>> Running: FREQ=${freq:-default} | SCHEDULE=${sched},${chunk} | THREADS=${threads}"
                 
