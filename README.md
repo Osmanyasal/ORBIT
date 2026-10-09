@@ -160,3 +160,54 @@ python3 tools/orbit-viz.py --json <run_directory> > report.json
 - **Dynamic Change ($\Delta$)**: Step-by-step performance shifts ($\Delta \text{metric}$), rates of change ($dM/dt$), percentage change ($\% \Delta$), and phase transition tracking.
 - **Cross-Region & Sweep Comparisons**: Side-by-side Pareto efficiency comparisons across parallel regions and thread/schedule/chunk configurations.
 
+## Best-Settings Search & Heatmaps 🔥
+
+Two companion tools process a parameter sweep (one sub-folder per execution, each with a `snapshot.conf` plus the per-region `*__cpu_energy.json` / `*__cpu_pmu.json` files) and find the best OpenMP settings per parallel region.
+
+### `tools/best_settings.py`
+
+Compresses all calls of a region inside one execution into a single value (mean or median), merges repeated runs with identical settings, and reports for every region the **fastest** and the **lowest-EDP** configuration (EDP = energy [J] × time [s]).
+
+```bash
+python3 tools/best_settings.py <sweep_dir> [-o out_dir] [--stat mean|median] \
+                               [--skip-first N] [--time-source energy|pmu] [--top K] [-j JOBS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o, --out` | Output directory (default: `best_settings_<sweep_dir>` next to the sweep folder) |
+| `--stat` | How repeated calls of a region are compressed (default: `mean`) |
+| `--skip-first N` | Ignore the first N calls of each region (warm-up) |
+| `--time-source` | Take the duration from the `energy` (default) or `pmu` measurement |
+| `--top K` | Show the top-K settings per region in the terminal summary (default: 3) |
+| `-j, --jobs` | Parallel workers (default: all CPUs) |
+
+Outputs in the output directory:
+
+- `all_configs.csv`: one row per (region, threads, sched, chunk, frequency) with `calls`, per-call `time_s`, `energy_j`, `edp`, `power_w` and `ipc`.
+- `best_per_region.json`: fastest and best-EDP settings per region, with both per-call values and **totals over all calls** (per-call value × `calls`; total EDP = total time × total energy), plus a `_total` entry for the whole program.
+
+The terminal summary also prints estimated program-level totals (per-region best vs. best single uniform configuration).
+
+### `tools/plot_heatmaps.py`
+
+Reads `all_configs.csv` and writes two heatmaps per region: execution time (`<region>_time.<fmt>`) and **K-EDP** (`<region>_edp.<fmt>`), i.e. EDP divided by 1000, in kJ·s. The Y axis is the frequency, the X axis is sched/threads/chunk, and the colour scale is logarithmic (plain decimal tick labels). A star marks the fastest configuration and a diamond the lowest-K-EDP one. The legend next to each marker lists time, energy and K-EDP both **per call** and **total** (per call × number of calls).
+
+```bash
+python3 tools/plot_heatmaps.py <best_settings_dir> [-o out_dir] [--total] [--linear] [--format png|pdf|svg]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o, --out` | Output directory (default: `<best_settings_dir>/heatmaps`) |
+| `--total` | Colour the heatmaps by totals over all calls instead of per-call values (legend always shows both) |
+| `--linear` | Linear colour scale instead of logarithmic |
+| `--format` | Output format: `png` (default), `pdf` or `svg` |
+
+Requires `matplotlib` and `numpy`.
+
+```bash
+python3 tools/best_settings.py runs/bt.C.x
+python3 tools/plot_heatmaps.py best_settings_bt.C.x
+```
+

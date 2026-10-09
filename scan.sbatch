@@ -21,7 +21,12 @@
 
 # Program to sweep: the executable followed by its arguments (a relative path resolves against the submit directory).
 # PROGRAM=(/home/yas0014/orbit/ORBIT/bin/Release/orbit_test)
-PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/bt.C.x)
+# PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/bt.C.x)
+# PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/cg.C.x)
+# PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/ep.D.x)
+# PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/lu.C.x)
+# PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/mg.D.x)
+PROGRAM=(/home/yas0014/orbit/NPB3.4.4/NPB3.4-OMP/bin/sp.C.x)
 
 set -u -o pipefail
 

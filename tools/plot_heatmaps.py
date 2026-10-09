@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Per-region heatmaps of execution time and EDP.
+"""Per-region heatmaps of execution time and K-EDP.
 
 Reads all_configs.csv produced by best_settings.py. For every region two
-heatmaps are written: time and EDP (per-call mean, or --total for the
-whole-region totals). Y axis is the frequency, X axis is sched/threads/chunk.
-Both heatmaps mark the fastest (star) and lowest-EDP (diamond) configuration.
+heatmaps are written: time and K-EDP, i.e. EDP / 1000 in kJ*s (per-call mean,
+or --total for the whole-region totals). Y axis is the frequency, X axis is
+sched/threads/chunk. Both heatmaps mark the fastest (star) and lowest-K-EDP
+(diamond) configuration; the legend lists per-call and total (per-call x number
+of calls) time, energy and K-EDP.
 
 Usage:
     plot_heatmaps.py best_settings_bt.C.x [-o out_dir] [--total] [--format png]
@@ -36,6 +38,11 @@ def load(path):
     return rows
 
 
+def num(v):
+    """3 significant digits, never in scientific notation."""
+    return np.format_float_positional(float("%.3g" % v), trim="-")
+
+
 def draw(ax_fig, grid, xlabels, ylabels, group_edges, title, cbar_label, marks, fmt, log=True):
     fig, ax = ax_fig
     im = ax.imshow(np.ma.masked_invalid(grid), origin="lower", aspect="auto",
@@ -60,7 +67,7 @@ def draw(ax_fig, grid, xlabels, ylabels, group_edges, title, cbar_label, marks, 
         ticks = np.geomspace(lo, hi, 7)
         cb.set_ticks(ticks)
         cb.ax.yaxis.set_minor_locator(matplotlib.ticker.NullLocator())
-        cb.set_ticklabels(["%.3g" % t for t in ticks])
+        cb.set_ticklabels([num(t) for t in ticks])
     cb.set_label(cbar_label)
     fig.subplots_adjust(top=0.85)
     fig.savefig(fmt, dpi=150, bbox_inches="tight")
@@ -73,7 +80,7 @@ def main():
     ap.add_argument("results", help="folder with all_configs.csv (best_settings.py output)")
     ap.add_argument("-o", "--out", default=None, help="output dir (default: <results>/heatmaps)")
     ap.add_argument("--total", action="store_true",
-                    help="plot totals over all calls of the region instead of per-call values")
+                    help="colour the heatmaps by totals over all calls instead of per-call values")
     ap.add_argument("--linear", action="store_true", help="linear colour scale (default: log)")
     ap.add_argument("--format", default="png", choices=("png", "pdf", "svg"))
     args = ap.parse_args()
@@ -86,10 +93,11 @@ def main():
 
     for region, rs in sorted(load(csv_path).items()):
         for r in rs:
-            k = r["calls"] if args.total else 1.0
-            r["t"] = r["time_s"] * k
-            r["e"] = r["energy_j"] * k
-            r["p"] = r["t"] * r["e"]
+            # Totals = per-call mean x number of calls of the region.
+            r["tt"] = r["time_s"] * r["calls"]
+            r["te"] = r["energy_j"] * r["calls"]
+            r["tp"] = r["tt"] * r["te"]
+            r["p"] = r["time_s"] * r["energy_j"]
 
         cols = sorted({(r["sched"], r["threads"], r["chunk"]) for r in rs})
         freqs = sorted({r["frequency"] for r in rs})
@@ -99,7 +107,8 @@ def main():
         ylabels = [f"{f / 1e6:.2f}" for f in freqs]
         edges = [i for i in range(1, len(cols)) if cols[i][:2] != cols[i - 1][:2]]
 
-        fast = min(rs, key=lambda r: r["t"])
+        # Selection is identical for per-call and total values (calls is constant per region).
+        fast = min(rs, key=lambda r: r["time_s"])
         edp = min(rs, key=lambda r: r["p"])
 
         def pos(r):
@@ -110,25 +119,32 @@ def main():
                     f"{r['frequency'] / 1e6:.2f} GHz")
 
         def stats(r):
-            return f"time {r['t'] * 1e3:.2f} ms, energy {r['e']:.3g} J, EDP {r['p']:.3g} J*s"
+            return (f"per call: {r['time_s'] * 1e3:.2f} ms, {num(r['energy_j'])} J, "
+                    f"K-EDP {num(r['p'] / 1e3)} kJ*s\n"
+                    f"total ({r['calls']:g} calls): {r['tt'] * 1e3:.2f} ms, {num(r['te'])} J, "
+                    f"K-EDP {num(r['tp'] / 1e3)} kJ*s")
 
         marks = [
             (*pos(fast), "*", "white", f"fastest: {desc(fast)}\n{stats(fast)}"),
-            (*pos(edp), "D", "white", f"lowest EDP: {desc(edp)}\n{stats(edp)}"),
+            (*pos(edp), "D", "white", f"lowest K-EDP: {desc(edp)}\n{stats(edp)}"),
         ]
 
-        for key, label, scale, unit in (("t", "time", 1e3, "ms"), ("p", "edp", 1.0, "J*s")):
+        # (grid key, file label, display name, scale to display unit, unit)
+        metrics = (("tt", "time", "time", 1e3, "ms"), ("tp", "edp", "K-EDP", 1e-3, "kJ*s")) if args.total else \
+                  (("time_s", "time", "time", 1e3, "ms"), ("p", "edp", "K-EDP", 1e-3, "kJ*s"))
+        scope = "total" if args.total else "per call"
+        for key, label, name, factor, unit in metrics:
             grid = np.full((len(freqs), len(cols)), np.nan)
             for r in rs:
                 x, y = pos(r)
-                grid[y, x] = r[key] * scale
-            scope = "total" if args.total else "per call"
-            title = f"{region}: {'execution time' if key == 't' else 'EDP'} ({scope})"
+                grid[y, x] = r[key] * factor
+            title = f"{region}: {'execution time' if label == 'time' else name} ({scope})"
             fig, ax = plt.subplots(figsize=(11, 6.5))
             path = os.path.join(out, f"{region}_{label}.{args.format}")
-            draw((fig, ax), grid, xlabels, ylabels, edges, title, f"{label} [{unit}]" + ("" if args.linear else " (log scale)"),
+            draw((fig, ax), grid, xlabels, ylabels, edges, title,
+                 f"{name} [{unit}]" + ("" if args.linear else " (log scale)"),
                  marks, path, log=not args.linear)
-        print(f"{region}: fastest {desc(fast)}, lowest EDP {desc(edp)}")
+        print(f"{region}: fastest {desc(fast)}, lowest K-EDP {desc(edp)}")
 
     print(f"Wrote heatmaps to {out}", file=sys.stderr)
 
