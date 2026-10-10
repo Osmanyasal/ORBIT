@@ -3,6 +3,7 @@
 extern "C" void GOMP_parallel(void (*function)(void*), void* data,
                               unsigned threads, unsigned flags) {
     using Function = void (*)(void (*)(void*), void*, unsigned, unsigned);
+    ORBIT_TRACE("GOMP_parallel called with threads=" << threads << " flags=" << flags);
     static const auto next = orbit::resolve<Function>("GOMP_parallel");
     orbit::RegionScope scope(function, __builtin_return_address(0), "GOMP_parallel", threads);
     next(function, data, scope.region.current.threads, flags);

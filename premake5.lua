@@ -138,14 +138,16 @@ project "orbit"
     kind "SharedLib"
     targetname "orbit"
     base_project_setup()
-    files { "src/orbit.cc", "src/interceptor*.hh", "src/region.hh", "src/utils.hh" }
+    files { "src/orbit.cc", "src/interceptor*.hh", "src/config_reader.hh", "src/json_utils.hh",
+            "src/policy.hh", "src/region.hh", "src/utils.hh" }
     interceptor_backend_setup()
 
 project "analiser"
     kind "ConsoleApp"
     targetname "analiser"
     base_project_setup()
-    files { "src/analiser.cc", "src/region.hh", "src/utils.hh" }
+    files { "src/analiser.cc", "src/config_reader.hh", "src/json_utils.hh", "src/policy.hh",
+            "src/region.hh", "src/utils.hh" }
 
 project "orbit_test"
     kind "ConsoleApp"

@@ -53,11 +53,16 @@ development package is commonly named `libffi-devel`; on Debian/Ubuntu it is
 Preload `liborbit.so` into an application using the selected OpenMP runtime.
 On start ORBIT checks `ORBIT_OPTIMIZED_CONF` and picks its mode:
 
-- **Optimize** (`ORBIT_OPTIMIZED_CONF` names an existing file): the per-region `threads`, `sched`, `chunk` and
-  `frequency` it contains are applied to the matching regions at runtime.
+- **Optimize** (`ORBIT_OPTIMIZED_CONF` names an existing file, typically the `best_per_region.json` written by
+  `tools/best_settings.py`): for every matching region ORBIT loads the evaluated `fastest` and `best_edp`
+  candidates and applies one of them (`threads`, `sched`, `chunk`, `frequency`) at runtime, as selected by
+  `ORBIT_OPTIMIZE_POLICY` (see below). Regions whose total execution time (either best runtime or best edp) is not above the threshold
+  (default 100 ms) are skipped.
 - **Snapshot** (variable unset or file missing): regions run with the settings given by the
   environment and are profiled; each region is appended to
-  `snapshot.conf` in the OPTKIT execution folder. Run the application several
+  `snapshot.conf` in the OPTKIT execution folder the first time it runs with a given set of settings
+  (`threads`, `sched`, `chunk`, `frequency`), so a region entered many times with the same settings has a
+  single entry. Run the application several
   times, varying `OMP_NUM_THREADS`, `OMP_SCHEDULE` (schedule and chunk) and
   `ORBIT_CPU_FREQ` (MHz, or with a unit such as `2.4GHz`), to compare settings.
   A region entered repeatedly (e.g. inside a time-step loop) is profiled on every entry; each entry is
@@ -69,9 +74,26 @@ On start ORBIT checks `ORBIT_OPTIMIZED_CONF` and picks its mode:
 OMP_NUM_THREADS=8 OMP_SCHEDULE=dynamic,4 ORBIT_CPU_FREQ=2400 \
 LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
 
-# apply the chosen settings
-ORBIT_OPTIMIZED_CONF=optimized.conf LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
+# apply the chosen settings (lowest-EDP candidate by default)
+ORBIT_OPTIMIZED_CONF=best_per_region.json LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
+
+# apply the fastest candidate instead, and also tune regions down to 10 ms
+ORBIT_OPTIMIZED_CONF=best_per_region.json ORBIT_OPTIMIZE_POLICY=fastest ORBIT_TIME_THRESHOLD=10ms \
+LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
 ```
+
+### Optimize Mode Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `ORBIT_OPTIMIZED_CONF` | Path to the configuration file (`best_per_region.json`). If set and the file exists, ORBIT runs in Optimize mode; otherwise in Snapshot mode. |
+| `ORBIT_OPTIMIZE_POLICY` | Which evaluated candidate is applied to each region: `edp` (default; `best_edp` is accepted as an alias) applies the lowest-EDP settings, `fastest` applies the lowest-time settings. If the preferred candidate is missing for a region, the other one is used. |
+| `ORBIT_TIME_THRESHOLD` | Minimum total execution time of a region (`total_time_s`) for it to be tuned. Accepts `100ms`, `0.1s` or a plain number (values >= 10 are milliseconds, smaller values seconds). Default `100ms`; `0` tunes every region. |
+
+The file is read into `Region::fastest` and `Region::best_edp` (with `calls` and `configs_evaluated`);
+the chosen candidate is then copied into `Region::current` when the region starts, before `region_begin` runs.
+A configuration file holding a single flat setting per region (the `snapshot.conf` format) is also accepted;
+that setting is used as both candidates.
 
 ### Snapshot Profiling Considerations
 

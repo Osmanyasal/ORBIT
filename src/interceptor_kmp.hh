@@ -38,9 +38,16 @@ extern "C" void __kmpc_fork_call(orbit::kmp::Location* location, std::int32_t ar
     using Function = void (*)(orbit::kmp::Location*, std::int32_t, orbit::kmp::Microtask, ...);
     static const auto next = orbit::resolve<Function>("__kmpc_fork_call");
     const auto total = static_cast<unsigned>(argc) + 3;
-    std::vector<void*> captured(static_cast<unsigned>(argc));
-    std::vector<void*> values(total);
-    std::vector<ffi_type*> types(total, &ffi_type_pointer);
+    // The call is forwarded through libffi because the number of captured arguments is only known at
+    // run time. These buffers are reused by every call of a thread, so there is no allocation after
+    // the first one. Sharing them with a nested fork on the same thread is safe: libffi has already
+    // read them by the time the microtask runs.
+    thread_local std::vector<void*> captured;
+    thread_local std::vector<void*> values;
+    thread_local std::vector<ffi_type*> types;
+    captured.resize(static_cast<unsigned>(argc));
+    values.resize(total);
+    types.assign(total, &ffi_type_pointer);
     types[1] = &ffi_type_sint32;
     values[0] = &location;
     values[1] = &argc;
@@ -65,7 +72,8 @@ extern "C" void __kmpc_fork_call(orbit::kmp::Location* location, std::int32_t ar
         OPTKIT_ERROR("ORBIT: thread count exceeds KMP ABI range");
         std::_Exit(EXIT_FAILURE);
     }
-    if (scope.region.current.threads && scope.region.current.threads != requested_threads) {
+    if (scope.region.current.threads &&
+        static_cast<unsigned>(scope.region.current.threads) != requested_threads) {
         using GetThread = std::int32_t (*)(orbit::kmp::Location*);
         using PushThreads = void (*)(orbit::kmp::Location*, std::int32_t, std::int32_t);
         static const auto get_thread = orbit::resolve<GetThread>("__kmpc_global_thread_num");

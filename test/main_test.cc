@@ -11,7 +11,7 @@ int main() {
     // =========================================================================
     int parallel_threads = 0;
     double compute_acc = 0.0;
-    #pragma omp parallel reduction(+:compute_acc)
+    #pragma omp parallel reduction(+:compute_acc) num_threads(16)
     {
         #pragma omp single
         parallel_threads = omp_get_num_threads();

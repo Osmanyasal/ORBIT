@@ -2,7 +2,9 @@
 """Find the best OpenMP settings per parallel region (fastest and lowest EDP).
 
 Expected layout (one sub-folder per execution):
-    <root>/<run>/snapshot.conf                     concatenated JSON objects, one per region call
+    <root>/<run>/snapshot.conf                     concatenated JSON objects, one per region and
+                                                   set of settings (a repeated call with the same
+                                                   settings is not recorded again)
     <root>/<run>/<region>__cpu_energy.json         list of readings, one per call of <region>
     <root>/<run>/<region>__cpu_pmu.json            list of readings, one per call of <region>
 
@@ -86,7 +88,9 @@ def process_run(args):
             continue
         energy = load_readings(energy_path)
         pmu = load_readings(pmu_path) if os.path.isfile(pmu_path) else []
-        n = min(len(items), len(energy))
+        # The energy file holds one reading per call. snapshot.conf only has a new record when the
+        # settings of the region change, so its record count says nothing about the number of calls.
+        n = len(energy)
         settings = {k: items[0][k] for k in SETTING_KEYS}
         for it in items:
             if any(it[k] != settings[k] for k in SETTING_KEYS):
