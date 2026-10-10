@@ -163,15 +163,12 @@ namespace orbit
                 const auto it = runtime.configs.find(region.name);
                 if (it != runtime.configs.end())
                 {
-                    region.threads = it->second.threads;
-                    region.chunk = it->second.chunk;
-                    region.sched = it->second.sched;
-                    region.frequency = it->second.frequency;
+                    region.take_tuning(it->second);
                 }
             }
             else if (runtime.mode == detail::Mode::Snapshot)
             {
-                region.frequency = runtime.frequency;   // set the region frequency to the runtime frequency in snapshot mode
+                region.current.frequency = runtime.frequency;   // set the region frequency to the runtime frequency in snapshot mode
                 optkit::pmu::cpu::perf::PerfProfilerConfig perf_config{region.name.c_str(), false /*is_sampling*/};
                 // perf_config.is_screenshot = true;
 

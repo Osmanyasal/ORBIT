@@ -61,16 +61,16 @@ extern "C" void __kmpc_fork_call(orbit::kmp::Location* location, std::int32_t ar
     const unsigned requested_threads = orbit::kmp::pending_threads;
     orbit::kmp::pending_threads = 0;
     orbit::RegionScope scope(function, __builtin_return_address(0), "__kmpc_fork_call", requested_threads);
-    if (scope.region.threads > INT_MAX) {
+    if (scope.region.current.threads > INT_MAX) {
         OPTKIT_ERROR("ORBIT: thread count exceeds KMP ABI range");
         std::_Exit(EXIT_FAILURE);
     }
-    if (scope.region.threads && scope.region.threads != requested_threads) {
+    if (scope.region.current.threads && scope.region.current.threads != requested_threads) {
         using GetThread = std::int32_t (*)(orbit::kmp::Location*);
         using PushThreads = void (*)(orbit::kmp::Location*, std::int32_t, std::int32_t);
         static const auto get_thread = orbit::resolve<GetThread>("__kmpc_global_thread_num");
         static const auto push_threads = orbit::resolve<PushThreads>("__kmpc_push_num_threads");
-        push_threads(location, get_thread(location), static_cast<std::int32_t>(scope.region.threads));
+        push_threads(location, get_thread(location), static_cast<std::int32_t>(scope.region.current.threads));
     }
     ffi_call(&interface, FFI_FN(next), nullptr, values.data());
 }
