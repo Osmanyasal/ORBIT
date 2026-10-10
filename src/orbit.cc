@@ -17,7 +17,7 @@ using CpuFrequency = optkit::frequency::cpu::Frequency;
 // milliseconds that is called thousands of times. The governor therefore
 //  - writes a frequency only when it differs from the one in effect, so a hot loop of the same
 //    region sets it once on the first call and never again, and
-//  - restores the baseline (the ORBIT_CPU_FREQ value, or the system default) only when the regions
+//  - restores the baseline (the ORBIT_CPU_FREQ value, or the unrestricted hardware range) only when the regions
 //    stop: no region has been running for a grace period. A watchdog thread detects that, since
 //    nothing else happens when a region is simply not entered again.
 // A different region with another frequency switches directly, without an intermediate reset.
@@ -83,8 +83,9 @@ private:
         return this->applied_ != this->baseline_ && this->active_regions_ == 0;
     }
 
-    // Applies the frequency to all sockets, 0 meaning the system default, and records how long the
-    // switch took. The caller holds the mutex.
+    // Applies the frequency to all sockets and records how long the switch took. 0 means no frequency
+    // is pinned: the cores' scaling limits are set back to the hardware minimum and maximum. The caller
+    // holds the mutex.
     void apply(std::int64_t frequency) {
         const auto start = Clock::now();
         bool all_sockets_ok = true;
@@ -148,8 +149,8 @@ private:
     std::mutex mutex_;
     std::condition_variable wakeup_;
     std::thread watchdog_;
-    std::int64_t baseline_;  // frequency to return to, 0 for the system default
-    std::int64_t applied_;   // frequency currently in effect, 0 for the system default
+    std::int64_t baseline_;  // frequency to return to, 0 for none pinned (hardware min/max range)
+    std::int64_t applied_;   // frequency currently in effect, 0 for none pinned
     int active_regions_;     // regions currently running, nested or on several threads
     std::uint64_t activity_; // incremented on every region entry and exit
     double switch_cost_s_;   // duration of the last frequency switch
