@@ -255,35 +255,44 @@ python3 tools/best_settings.py runs/bt.C.x
 python3 tools/plot_heatmaps.py best_settings_bt.C.x
 ```
 
-## GRU Configuration Predictor 🧠
+## Configuration Predictor (GRU / MLP) 🧠
 
-`tools/ml/train_gru.py` trains two GRU models (`fastest` and `best_edp`) on the `all_configs.csv` / `best_per_region.json` pairs written by `tools/best_settings.py`. From the PMU and energy metrics of a single snapshot execution (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio, time_s, power_w), the models predict `threads`, `sched`, `chunk` and `frequency` per region, and `generate` writes them as a `best_per_region.json`-style file for Optimize mode.
+`tools/train_gru.py` trains two models (`fastest` and `best_edp`) on the `all_configs.csv` / `best_per_region.json` pairs written by `tools/best_settings.py`. From the PMU and energy metrics of a single snapshot execution (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio, time_s, power_w), the models predict `threads`, `sched`, `chunk` and `frequency` per region, and `generate` writes them as a `best_per_region.json`-style file for Optimize mode.
 
 Requires `numpy`, `pandas` and `torch`.
 
 ```bash
-cd tools/ml
+cd tools
 
 # 1. Train on every <data_dir>/**/ folder holding all_configs.csv + best_per_region.json
-python3 train_gru.py train --data-dir <data_dir> --out-dir models
+python3 train_gru.py train --data-dir <data_dir> --out-dir models [--model gru|mlp]
 
 # 2. Run the application once in Snapshot mode (ORBIT_OPTIMIZED_CONF unset), then predict from that execution folder
 python3 train_gru.py generate --model-dir models --snapshots <execution_folder> --output predicted_best_per_region.json
 
 # 3. Apply the prediction
 ORBIT_OPTIMIZED_CONF=predicted_best_per_region.json ORBIT_OPTIMIZE_POLICY=edp \
-LD_PRELOAD="$PWD/../../bin/Release/liborbit.so" ./your_application
+LD_PRELOAD="$PWD/../bin/Release/liborbit.so" ./your_application
 ```
 
 | Command | Description |
 |---------|-------------|
-| `train` | Leave-one-application-out cross-validation, then trains and saves `model_fastest.pt`, `model_best_edp.pt` and `cv_metrics.json` in `--out-dir`. `--cv-mode none` skips validation, `--targets` trains one model, `--features` selects the metrics. |
+| `train` | Leave-one-application-out cross-validation, then trains and saves `model_fastest.pt`, `model_best_edp.pt` and `cv_metrics.json` in `--out-dir`. `--model` selects the network, `--cv-mode none` skips validation, `--targets` trains one model, `--features` selects the metrics. |
 | `generate` | Reads snapshot execution folder(s) (`--snapshots`, a folder with `snapshot.conf` or a folder of them) and writes the configuration file. Each region needs both its `*__cpu_pmu.json` and `*__cpu_energy.json`. |
 | `predict` | Prints or saves recommendations from any CSV in the `all_configs.csv` format (`--input`, `--output`). |
+
+Models (`train --model`):
+
+| Model | Description |
+|-------|-------------|
+| `gru` (default) | A GRU reads up to `--max-len` observations of a region and predicts the four settings. |
+| `mlp` | Feed-forward DNN (`--layers` dense layers, default 3): the same dense stack encodes every observation, the encodings are averaged, and linear heads predict the four settings. `--max-len 1` makes it a plain MLP on one observation. |
+
+The order of the observations carries no information, so both models reach similar accuracy: in leave-one-application-out validation (3 seeds) the extra time/EDP of the predicted config versus the optimum was within the seed-to-seed spread (about ±2–4 points) when a region has a single observation, which is what one snapshot execution gives. With 8 observations per region the MLP was slightly better and more stable for `best_edp`. Checkpoints record their model type, so `predict` and `generate` work with either.
 
 Notes:
 
 - `generate` writes `fastest` and `best_edp` for each region; `ORBIT_OPTIMIZE_POLICY` picks one. The `total_time_s` it contains is `calls` × the best per-call time measured in the snapshot (used for `ORBIT_TIME_THRESHOLD`), not a prediction.
 - Models only know the values seen in training (threads, schedules, chunks and frequencies of the sweep); retrain after adding applications or changing hardware.
-- Validation on unseen applications shows predictions clearly better than leaving the snapshot settings unchanged, but still above the optimum (see `models/cv_metrics.json`).
+- Validation on unseen applications shows predictions better than a single fixed configuration (clearly for `best_edp`, only slightly for `fastest`), but still above the optimum (see `models/cv_metrics.json`). More training applications are the most likely way to improve it.
 

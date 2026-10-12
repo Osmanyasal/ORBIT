@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Train GRU models that predict the best OpenMP configuration of a code region.
+"""Train models that predict the best OpenMP configuration of a code region.
+
+Two model types share the whole pipeline (data, cross-validation, ``predict``, ``generate``);
+choose with ``train --model``: ``gru`` (default, recurrent over the observations) or ``mlp``
+(feed-forward DNN: the same dense layers encode every observation, the encodings are averaged).
+Observation order carries no information, so both reach similar accuracy; see the README.
 
 Data layout (``--data-dir``): every folder below it that contains both
 ``all_configs.csv`` and ``best_per_region.json`` is treated as one application.
@@ -7,7 +12,7 @@ Data layout (``--data-dir``): every folder below it that contains both
 Problem formulation
 -------------------
 * One training sample = one region.
-* Input  = a sequence of profiling observations of that region. Each step holds
+* Input  = a set of profiling observations of that region. Each one holds
   the performance metrics (default: ipc, l2_hit_ratio, l3_mpki,
   branch_mispr_ratio, plus time_s and power_w - restrict with --features) and
   the configuration they were measured under (threads, sched, chunk,
@@ -32,7 +37,7 @@ the true optimum, looked up in all_configs.csv, next to two simple baselines.
 
 Usage
 -----
-    python train_gru.py train    --data-dir ../../../P10-data --out-dir models
+    python train_gru.py train    --data-dir ../../P10-data --out-dir models [--model gru|mlp]
     python train_gru.py generate --model-dir models --snapshots <snapshot run or folder of runs> \\
                                  --output predicted_best_per_region.json
     python train_gru.py predict  --model-dir models --input some_all_configs.csv
@@ -250,6 +255,7 @@ def sample_batch(xpad, nrows, reg, max_len, lens, gen):
 class ConfigGRU(nn.Module):
     def __init__(self, in_dim: int, hidden: int, layers: int, dropout: float, head_sizes: dict):
         super().__init__()
+        self.in_dim = in_dim
         self.embed = nn.Sequential(nn.Linear(in_dim, hidden), nn.GELU())
         self.gru = nn.GRU(hidden, hidden, layers, batch_first=True,
                           dropout=dropout if layers > 1 else 0.0)
@@ -260,6 +266,31 @@ class ConfigGRU(nn.Module):
         out, _ = self.gru(self.embed(x))
         h = self.drop(out[torch.arange(x.size(0)), lens - 1])
         return {k: head(h) for k, head in self.heads.items()}
+
+
+class ConfigMLP(nn.Module):
+    """Feed-forward DNN. The same dense stack encodes every observation, the encodings are averaged
+    over the observations of the sample (so their order is irrelevant) and linear heads predict the
+    four settings. With a single observation this is a plain MLP classifier."""
+
+    def __init__(self, in_dim: int, hidden: int, layers: int, dropout: float, head_sizes: dict):
+        super().__init__()
+        self.in_dim = in_dim
+        blocks, width = [], in_dim
+        for _ in range(layers):
+            blocks += [nn.Linear(width, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(dropout)]
+            width = hidden
+        self.encoder = nn.Sequential(*blocks)
+        self.heads = nn.ModuleDict({h: nn.Linear(hidden, n) for h, n in head_sizes.items()})
+
+    def forward(self, x, lens):
+        valid = (torch.arange(x.size(1))[None, :] < lens[:, None]).unsqueeze(-1).to(x.dtype)
+        h = (self.encoder(x) * valid).sum(1) / lens[:, None].to(x.dtype)
+        return {k: head(h) for k, head in self.heads.items()}
+
+
+MODELS = {"gru": ConfigGRU, "mlp": ConfigMLP}
+DEFAULT_LAYERS = {"gru": 1, "mlp": 3}
 
 
 def soft_label_matrix(n: int, sigma: float) -> torch.Tensor:
@@ -287,7 +318,7 @@ def train_model(train: list[Region], target: str, vocab: dict, args, tag: str = 
     xpad, nrows = build_tensors(train, pre, not args.no_config_context)
     labels = torch.from_numpy(np.stack([r.labels[target] for r in train]))
     head_sizes = {h: len(vocab[h]) for h in HEADS}
-    model = ConfigGRU(xpad.shape[2], args.hidden, args.layers, args.dropout, head_sizes)
+    model = MODELS[args.model](xpad.shape[2], args.hidden, args.layers, args.dropout, head_sizes)
     steps_per_epoch = math.ceil(len(train) * args.samples_per_region / args.batch_size)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * steps_per_epoch)
@@ -417,7 +448,7 @@ def cross_validate(regions, target, vocab, args) -> pd.DataFrame:
         xpad, nrows = build_tensors(test, pre, not args.no_config_context)
         for length in sorted({1, args.max_len}):
             probs = predict_proba(model, xpad, nrows, length, args.eval_draws, args.seed + 1)
-            rows += score_rows(f"GRU L={length}", test, target, argmax_config(probs))
+            rows += score_rows(f"{args.model.upper()} L={length}", test, target, argmax_config(probs))
             if length == args.max_len:
                 mean_probs = {h: p.mean(1, keepdim=True) for h, p in probs.items()}
                 rows += score_rows(avg_method_name(args), test, target, argmax_config(mean_probs))
@@ -429,7 +460,7 @@ def cross_validate(regions, target, vocab, args) -> pd.DataFrame:
 
 
 def avg_method_name(args) -> str:
-    return f"GRU L={args.max_len}, avg of {args.eval_draws} subsets"
+    return f"{args.model.upper()} L={args.max_len}, avg of {args.eval_draws} subsets"
 
 
 def report_cv(df: pd.DataFrame, target: str, n_regions: int, args):
@@ -452,7 +483,8 @@ def report_cv(df: pd.DataFrame, target: str, n_regions: int, args):
 def save_checkpoint(path: Path, model, pre, vocab, target, args, n_regions, features):
     torch.save({
         "state_dict": model.state_dict(),
-        "arch": {"in_dim": model.embed[0].in_features, "hidden": args.hidden, "layers": args.layers,
+        "model": args.model,
+        "arch": {"in_dim": model.in_dim, "hidden": args.hidden, "layers": args.layers,
                  "dropout": args.dropout},
         "vocab": vocab,
         "features": list(features),
@@ -468,7 +500,7 @@ def load_checkpoint(path: Path):
     ck = torch.load(path, map_location="cpu", weights_only=True)
     head_sizes = {h: len(ck["vocab"][h]) for h in HEADS}
     a = ck["arch"]
-    model = ConfigGRU(a["in_dim"], a["hidden"], a["layers"], a["dropout"], head_sizes)
+    model = MODELS[ck.get("model", "gru")](a["in_dim"], a["hidden"], a["layers"], a["dropout"], head_sizes)
     model.load_state_dict(ck["state_dict"])
     model.eval()
     return model, ck
@@ -478,6 +510,8 @@ def load_checkpoint(path: Path):
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_train(args):
+    if args.layers is None:
+        args.layers = DEFAULT_LAYERS[args.model]
     features = tuple(f.strip() for f in args.features.split(",") if f.strip())
     out_dir = Path(args.out_dir)
     regions, vocab = load_regions(Path(args.data_dir), features)
@@ -489,6 +523,8 @@ def cmd_train(args):
     print(f"Features: {', '.join(features)}"
           f"{'' if args.no_config_context else ' + measured-under config (threads, sched, chunk, frequency)'}")
     print("Config space: " + ", ".join(f"{h}={len(vocab[h])}" for h in HEADS))
+    print(f"Model: {args.model} ({args.layers} layer{'s' if args.layers != 1 else ''}, hidden {args.hidden}, "
+          f"{args.max_len} observation{'s' if args.max_len != 1 else ''} per sample)")
 
     summary = {}
     for target in args.targets:
@@ -683,9 +719,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    t = sub.add_parser("train", help="cross-validate and train one GRU per target")
+    t = sub.add_parser("train", help="cross-validate and train one model (GRU or MLP) per target")
     t.add_argument("--data-dir", required=True, help="folder holding per-application sub-folders")
     t.add_argument("--out-dir", default="models")
+    t.add_argument("--model", choices=tuple(MODELS), default="gru",
+                   help="gru = recurrent over the observations, mlp = feed-forward DNN on the mean of "
+                        "per-observation encodings (use --max-len 1 for one observation per sample)")
     t.add_argument("--targets", nargs="+", choices=TARGETS, default=list(TARGETS))
     t.add_argument("--features", default=",".join(DEFAULT_FEATURES),
                    help="comma-separated metric columns of all_configs.csv used as model input")
@@ -697,7 +736,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--eval-draws", type=int, default=32, help="random observation subsets per test region")
     t.add_argument("--max-len", type=int, default=8, help="max observations per sequence")
     t.add_argument("--hidden", type=int, default=64)
-    t.add_argument("--layers", type=int, default=1)
+    t.add_argument("--layers", type=int, default=None,
+                   help="recurrent layers (gru, default 1) or dense layers (mlp, default 3)")
     t.add_argument("--dropout", type=float, default=0.2)
     t.add_argument("--epochs", type=int, default=40)
     t.add_argument("--samples-per-region", type=int, default=64, help="sequences drawn per region per epoch")
