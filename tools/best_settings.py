@@ -21,6 +21,7 @@ Usage:
 import argparse
 import csv
 import json
+import math
 import os
 import statistics
 import sys
@@ -28,6 +29,7 @@ from collections import defaultdict
 from multiprocessing import Pool
 
 SETTING_KEYS = ("threads", "sched", "chunk", "frequency")
+PMU_METRICS = ("ipc", "l2_hit_ratio", "l3_mpki", "branch_mispr_ratio")
 
 
 def read_concatenated_json(path):
@@ -98,7 +100,8 @@ def process_run(args):
                       file=sys.stderr)
                 break
 
-        times, joules, ipcs = [], [], []
+        times, joules = [], []
+        pmu_vals = {k: [] for k in PMU_METRICS}
         for i in range(skip_first, n):
             e = energy[i]
             if e is None:
@@ -111,11 +114,14 @@ def process_run(args):
                 t = p[0]
             times.append(t / 1000.0)
             joules.append(e_j)
-            if p is not None and "ipc" in p[1]:
-                ipcs.append(p[1]["ipc"])
+            if p is not None:
+                for k in PMU_METRICS:
+                    if k in p[1]:
+                        pmu_vals[k].append(p[1][k])
         if not times:
             continue
         t, e = agg(times), agg(joules)
+        pmu_agg = {k: agg(pmu_vals[k]) if pmu_vals[k] else float("nan") for k in PMU_METRICS}
         rows.append({
             "region": region,
             "caller": items[0].get("caller"),
@@ -127,7 +133,7 @@ def process_run(args):
             "energy_j": e,
             "edp": t * e,
             "power_w": e / t if t > 0 else float("nan"),
-            "ipc": agg(ipcs) if ipcs else float("nan"),
+            **pmu_agg,
         })
     return rows
 
@@ -179,8 +185,9 @@ def main():
     merged = []
     for rs in grouped.values():
         m = dict(rs[0])
-        for k in ("time_s", "energy_j", "ipc"):
-            m[k] = agg([x[k] for x in rs])
+        for k in ("time_s", "energy_j", *PMU_METRICS):
+            vals = [x[k] for x in rs if not math.isnan(x[k])]
+            m[k] = agg(vals) if vals else float("nan")
         m["edp"] = m["time_s"] * m["energy_j"]
         m["power_w"] = m["energy_j"] / m["time_s"] if m["time_s"] > 0 else float("nan")
         m["calls"] = sum(x["calls"] for x in rs) // len(rs)
@@ -192,7 +199,7 @@ def main():
         by_region[r["region"]].append(r)
 
     fields = ["region", "caller", "function", *SETTING_KEYS, "calls",
-              "time_s", "energy_j", "edp", "power_w", "ipc", "run"]
+              "time_s", "energy_j", "edp", "power_w", *PMU_METRICS, "run"]
     with open(os.path.join(out, "all_configs.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()

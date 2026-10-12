@@ -182,6 +182,28 @@ python3 tools/orbit-viz.py --json <run_directory> > report.json
 - **Dynamic Change ($\Delta$)**: Step-by-step performance shifts ($\Delta \text{metric}$), rates of change ($dM/dt$), percentage change ($\% \Delta$), and phase transition tracking.
 - **Cross-Region & Sweep Comparisons**: Side-by-side Pareto efficiency comparisons across parallel regions and thread/schedule/chunk configurations.
 
+## Preparing Benchmarks for the Sweep
+
+`scan.sh` varies `OMP_SCHEDULE` (schedule and chunk), which ORBIT applies with `omp_set_schedule()`. That only affects loops written with `schedule(runtime)`; loops with a fixed schedule or none ignore it, so the sweep would show no effect of `sched`/`chunk`. The NPB sources already use `schedule(runtime)`. For other applications run `tools/patch_schedule_runtime.py` on their source before building:
+
+```bash
+python3 tools/patch_schedule_runtime.py <src_dir> [<src_dir> ...] [--dry-run] [--backup] [--report FILE]
+```
+
+It adds `schedule(runtime)` to worksharing loops (`for`, `parallel for`, Fortran `do`, `parallel do`, with or without `simd`) that have no schedule clause, and replaces `schedule(static|dynamic|guided|auto[, n])` by `schedule(runtime)`. C, C++ and free-form Fortran (`.f90`/`.f95`/`.f03`) are handled, including multi-line directives. Offload (`target`, `teams`, `distribute`), `simd`, `task` and `sections` constructs are left alone, and a second run changes nothing.
+
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Report what would change, write nothing |
+| `--backup` | Keep `<file>.orig` for every modified file (not needed inside a git repository: use `git diff` / `git checkout .`) |
+| `--report FILE` | Write one line per loop: `file:line: action \| original directive` (`added`, `replaced schedule(...)`, `already runtime` or `skipped: ...`) |
+| `--exclude TEXT` | Skip files whose path contains `TEXT` (repeatable) |
+| `--allow-nowait TEXT` | Also patch `nowait` loops in files whose path contains `TEXT` (repeatable; review them first) |
+
+Loops with `nowait`, and the loops that follow one up to the next barrier or parallel region, are skipped and listed, unless they already use a dynamic, guided or auto schedule. With a static schedule an iteration runs on the same thread in consecutive loops, so a loop may depend on data written by a preceding `nowait` loop without a barrier; with dynamic scheduling that becomes a data race.
+
+Not handled, to be fixed by hand: fixed-form Fortran (`.f`), loops hidden in macros (the schedule inside a `#define`), and `omp_set_num_threads()` calls that override `OMP_NUM_THREADS`. The script never builds anything. After building, confirm that `sched` and `chunk` change the region times (for example `OMP_SCHEDULE=static,1`, `dynamic,1` and `dynamic,1024`) before starting a sweep.
+
 ## Best-Settings Search & Heatmaps 🔥
 
 Two companion tools process a parameter sweep (one sub-folder per execution, each with a `snapshot.conf` plus the per-region `*__cpu_energy.json` / `*__cpu_pmu.json` files) and find the best OpenMP settings per parallel region.
@@ -232,4 +254,36 @@ Requires `matplotlib` and `numpy`.
 python3 tools/best_settings.py runs/bt.C.x
 python3 tools/plot_heatmaps.py best_settings_bt.C.x
 ```
+
+## GRU Configuration Predictor 🧠
+
+`tools/ml/train_gru.py` trains two GRU models (`fastest` and `best_edp`) on the `all_configs.csv` / `best_per_region.json` pairs written by `tools/best_settings.py`. From the PMU and energy metrics of a single snapshot execution (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio, time_s, power_w), the models predict `threads`, `sched`, `chunk` and `frequency` per region, and `generate` writes them as a `best_per_region.json`-style file for Optimize mode.
+
+Requires `numpy`, `pandas` and `torch`.
+
+```bash
+cd tools/ml
+
+# 1. Train on every <data_dir>/**/ folder holding all_configs.csv + best_per_region.json
+python3 train_gru.py train --data-dir <data_dir> --out-dir models
+
+# 2. Run the application once in Snapshot mode (ORBIT_OPTIMIZED_CONF unset), then predict from that execution folder
+python3 train_gru.py generate --model-dir models --snapshots <execution_folder> --output predicted_best_per_region.json
+
+# 3. Apply the prediction
+ORBIT_OPTIMIZED_CONF=predicted_best_per_region.json ORBIT_OPTIMIZE_POLICY=edp \
+LD_PRELOAD="$PWD/../../bin/Release/liborbit.so" ./your_application
+```
+
+| Command | Description |
+|---------|-------------|
+| `train` | Leave-one-application-out cross-validation, then trains and saves `model_fastest.pt`, `model_best_edp.pt` and `cv_metrics.json` in `--out-dir`. `--cv-mode none` skips validation, `--targets` trains one model, `--features` selects the metrics. |
+| `generate` | Reads snapshot execution folder(s) (`--snapshots`, a folder with `snapshot.conf` or a folder of them) and writes the configuration file. Each region needs both its `*__cpu_pmu.json` and `*__cpu_energy.json`. |
+| `predict` | Prints or saves recommendations from any CSV in the `all_configs.csv` format (`--input`, `--output`). |
+
+Notes:
+
+- `generate` writes `fastest` and `best_edp` for each region; `ORBIT_OPTIMIZE_POLICY` picks one. The `total_time_s` it contains is `calls` × the best per-call time measured in the snapshot (used for `ORBIT_TIME_THRESHOLD`), not a prediction.
+- Models only know the values seen in training (threads, schedules, chunks and frequencies of the sweep); retrain after adding applications or changing hardware.
+- Validation on unseen applications shows predictions clearly better than leaving the snapshot settings unchanged, but still above the optimum (see `models/cv_metrics.json`).
 

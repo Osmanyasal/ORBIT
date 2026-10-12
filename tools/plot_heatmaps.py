@@ -40,6 +40,10 @@ def load(path):
 
 def num(v):
     """3 significant digits, never in scientific notation."""
+    if v is None or np.isnan(v):
+        return "nan"
+    if v == 0 or abs(v) < 1e-12:
+        return "0"
     return np.format_float_positional(float("%.3g" % v), trim="-")
 
 
@@ -62,7 +66,7 @@ def draw(ax_fig, grid, xlabels, ylabels, group_edges, title, cbar_label, marks, 
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.0), bbox_transform=fig.transFigure,
               ncol=2, fontsize=7.5, frameon=True)
     cb = fig.colorbar(im, ax=ax, pad=0.01)
-    if log:
+    if log and im.norm.vmin is not None and im.norm.vmax is not None and im.norm.vmin > 0 and im.norm.vmax > im.norm.vmin:
         lo, hi = im.norm.vmin, im.norm.vmax
         ticks = np.geomspace(lo, hi, 7)
         cb.set_ticks(ticks)

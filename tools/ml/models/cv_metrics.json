@@ -1,0 +1,126 @@
+{
+  "fastest": {
+    "GRU L=1": {
+      "threads%": 63.79,
+      "sched%": 54.167,
+      "chunk%": 18.353,
+      "frequency%": 27.827,
+      "exact%": 1.042,
+      "geomean_loss%": 31.152,
+      "median_loss%": 20.642,
+      "p90_loss%": 70.34
+    },
+    "GRU L=8": {
+      "threads%": 61.21,
+      "sched%": 52.282,
+      "chunk%": 17.659,
+      "frequency%": 22.817,
+      "exact%": 1.488,
+      "geomean_loss%": 31.255,
+      "median_loss%": 20.592,
+      "p90_loss%": 72.189
+    },
+    "GRU L=8, avg of 32 subsets": {
+      "threads%": 65.079,
+      "sched%": 52.381,
+      "chunk%": 22.222,
+      "frequency%": 22.222,
+      "exact%": 1.587,
+      "geomean_loss%": 29.317,
+      "median_loss%": 19.204,
+      "p90_loss%": 53.773
+    },
+    "baseline: majority label": {
+      "threads%": 36.508,
+      "sched%": 46.032,
+      "chunk%": 34.921,
+      "frequency%": 31.746,
+      "exact%": 3.175,
+      "geomean_loss%": 38.968,
+      "median_loss%": 27.176,
+      "p90_loss%": 84.469
+    },
+    "baseline: best global config": {
+      "threads%": 50.794,
+      "sched%": 53.968,
+      "chunk%": 22.222,
+      "frequency%": 36.508,
+      "exact%": 0.0,
+      "geomean_loss%": 36.715,
+      "median_loss%": 27.431,
+      "p90_loss%": 68.603
+    },
+    "oracle": {
+      "threads%": 100.0,
+      "sched%": 100.0,
+      "chunk%": 100.0,
+      "frequency%": 100.0,
+      "exact%": 100.0,
+      "geomean_loss%": 0.0,
+      "median_loss%": 0.0,
+      "p90_loss%": 0.0
+    }
+  },
+  "best_edp": {
+    "GRU L=1": {
+      "threads%": 69.097,
+      "sched%": 56.647,
+      "chunk%": 23.363,
+      "frequency%": 11.756,
+      "exact%": 2.083,
+      "geomean_loss%": 81.672,
+      "median_loss%": 45.592,
+      "p90_loss%": 247.332
+    },
+    "GRU L=8": {
+      "threads%": 63.641,
+      "sched%": 53.175,
+      "chunk%": 21.528,
+      "frequency%": 8.234,
+      "exact%": 1.24,
+      "geomean_loss%": 81.023,
+      "median_loss%": 49.695,
+      "p90_loss%": 222.133
+    },
+    "GRU L=8, avg of 32 subsets": {
+      "threads%": 66.667,
+      "sched%": 55.556,
+      "chunk%": 23.81,
+      "frequency%": 7.937,
+      "exact%": 1.587,
+      "geomean_loss%": 75.559,
+      "median_loss%": 46.626,
+      "p90_loss%": 180.788
+    },
+    "baseline: majority label": {
+      "threads%": 42.857,
+      "sched%": 61.905,
+      "chunk%": 22.222,
+      "frequency%": 7.937,
+      "exact%": 0.0,
+      "geomean_loss%": 163.46,
+      "median_loss%": 110.722,
+      "p90_loss%": 566.534
+    },
+    "baseline: best global config": {
+      "threads%": 23.81,
+      "sched%": 41.27,
+      "chunk%": 19.048,
+      "frequency%": 7.937,
+      "exact%": 0.0,
+      "geomean_loss%": 120.088,
+      "median_loss%": 83.966,
+      "p90_loss%": 304.565
+    },
+    "oracle": {
+      "threads%": 100.0,
+      "sched%": 100.0,
+      "chunk%": 100.0,
+      "frequency%": 100.0,
+      "exact%": 100.0,
+      "geomean_loss%": 0.0,
+      "median_loss%": 0.0,
+      "p90_loss%": 0.0
+    }
+  }
+}
