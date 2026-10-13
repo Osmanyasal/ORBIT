@@ -17,7 +17,15 @@ Problem formulation
   branch_mispr_ratio, plus time_s and power_w - restrict with --features) and
   the configuration they were measured under (threads, sched, chunk,
   frequency), since the metrics depend on it.
-* Output = four classification heads: threads, sched, chunk, frequency.
+* Output = four heads: threads, sched, chunk, frequency. ``sched`` is a plain classification.
+  ``threads``, ``chunk`` and ``frequency`` are classifications over *positions on a normalised
+  axis*, not over the values seen in training: threads / max threads of the machine, chunk on a log2
+  axis up to the largest trained chunk, frequency as the fraction of the machine's frequency range.
+  The bins of these axes are fixed (--thread-bins, --freq-bins), so the model never depends on which
+  exact settings were swept. At prediction time the bin distribution is turned into a continuous
+  position (--readout, default: the most likely bin; "median" interpolates between bins), de-normalised with the *target* machine's core count
+  and frequency range and snapped to the nearest valid setting there. So the model can return
+  settings that were never in the training sweep and can be used on another machine.
 * Label  = the "fastest" / "best_edp" entry of best_per_region.json. One model
   is trained per target. Because the optimum of 540 configs is often a
   near-tie, the label is blended (--hard-weight) with soft targets derived from
@@ -39,7 +47,8 @@ Usage
 -----
     python train_gru.py train    --data-dir ../../P10-data --out-dir models [--model gru|mlp]
     python train_gru.py generate --model-dir models --snapshots <snapshot run or folder of runs> \\
-                                 --output predicted_best_per_region.json
+                                 --output predicted_best_per_region.json \\
+                                 [--max-threads N] [--freq-range MIN_KHZ MAX_KHZ] [--freq-step KHZ]
     python train_gru.py predict  --model-dir models --input some_all_configs.csv
 
 ``generate`` is the application-execution step: run the application once in ORBIT snapshot
@@ -48,6 +57,10 @@ execution folder(s) and it writes a best_per_region.json-style file (``fastest``
 ``best_edp`` entries holding threads/sched/chunk/frequency per region) that ORBIT loads via
 ORBIT_OPTIMIZED_CONF.
 
+The machine description used for ``generate`` / ``predict`` defaults to what ``scan.sh`` sweeps on the
+current machine (nproc threads, the cpufreq range in 200 MHz steps); override it with
+--max-threads / --freq-range / --freq-step when predicting for another machine.
+
 Requires: numpy, pandas, torch (and ORBIT/tools/best_settings.py for ``generate``).
 """
 from __future__ import annotations
@@ -55,6 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -66,6 +80,10 @@ import torch
 from torch import nn
 
 HEADS = ("threads", "sched", "chunk", "frequency")
+UNIT_HEADS = ("threads", "chunk", "frequency")  # heads over positions on a normalised [0, 1] axis
+READOUTS = ("median", "mean", "argmax")
+CPUFREQ_DIR = Path("/sys/devices/system/cpu/cpu0/cpufreq")
+SWEEP_MIN_KHZ = 1_000_000  # scan.sh never sweeps below 1 GHz
 TARGETS = ("fastest", "best_edp")
 TARGET_METRIC = {"fastest": "time_s", "best_edp": "edp"}
 DEFAULT_FEATURES = ("ipc", "l2_hit_ratio", "l3_mpki", "branch_mispr_ratio", "time_s", "power_w")
@@ -77,14 +95,145 @@ BASELINES = ("baseline: majority label", "baseline: best global config")
 # --------------------------------------------------------------------------- #
 # Data loading
 # --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Machine:
+    """Valid values of the tunable settings on one machine. The model works on positions within these
+    ranges (see to_unit), never on absolute values, which is what lets it transfer between machines."""
+    threads: tuple
+    chunk: tuple
+    frequency: tuple
+    chunk_max: int  # chunk axis scale, fixed by the training data so it means the same everywhere
+
+
 @dataclass
 class Region:
     key: str
     app: str
     feats: np.ndarray  # (n, n_features) raw metric values
     ctx: np.ndarray  # (n, 4) normalised config the metrics were measured under
+    machine: Machine
     labels: dict = field(default_factory=dict)  # target -> (4,) class indices
     perf: dict = field(default_factory=dict)  # target -> dense (T,S,C,F) metric grid
+
+
+def to_unit(head: str, x, m: Machine) -> np.ndarray:
+    """Position of a setting on its normalised axis (0..1 inside the machine's range)."""
+    x = np.asarray(x, dtype=float)
+    if head == "threads":
+        return x / max(m.threads)
+    if head == "frequency":
+        lo, hi = min(m.frequency), max(m.frequency)
+        return (x - lo) / (hi - lo) if hi > lo else np.zeros_like(x)
+    return np.log2(x) / math.log2(m.chunk_max) if m.chunk_max > 1 else np.zeros_like(x)
+
+
+def snap(head: str, u: float, m: Machine) -> int:
+    """Valid setting of the machine whose position is closest to u."""
+    cands = np.asarray(getattr(m, head))
+    return int(cands[np.abs(to_unit(head, cands, m) - u).argmin()])
+
+
+def default_axes(vocab: dict, args) -> dict:
+    chunk_max = max(vocab["chunk"])
+    return {"chunk_max": int(chunk_max),
+            "bins": {"threads": args.thread_bins, "frequency": args.freq_bins,
+                     "chunk": max(2, round(math.log2(chunk_max)) + 1)}}  # one bin per power of two
+
+
+def head_sizes(vocab: dict, axes: dict) -> dict:
+    return {h: len(vocab[h]) if h == "sched" else axes["bins"][h] for h in HEADS}
+
+
+def unit_to_dist(u, k: int) -> np.ndarray:
+    """Positions in [0, 1] -> distributions over k evenly spaced bins (mass split between the two
+    nearest bins, so no information is lost when a value falls between bins)."""
+    pos = np.clip(np.atleast_1d(np.asarray(u, dtype=float)), 0.0, 1.0) * (k - 1)
+    lo = np.minimum(np.floor(pos).astype(int), k - 2)
+    frac = pos - lo
+    dist = np.zeros((pos.size, k))
+    rows = np.arange(pos.size)
+    dist[rows, lo] = 1.0 - frac
+    dist[rows, lo + 1] += frac
+    return dist
+
+
+def bin_matrix(head: str, vocab: dict, m: Machine, k: int) -> np.ndarray:
+    """(len(vocab[head]), k): the bin distribution of each vocabulary value on machine m."""
+    return unit_to_dist(to_unit(head, vocab[head], m), k)
+
+
+def readout_unit(p: torch.Tensor, readout: str) -> torch.Tensor:
+    """Bin probabilities (..., k) -> continuous position in [0, 1]. The median treats each bin's mass
+    as spread uniformly over the bin, so it can land between bins (and between trained settings)."""
+    k = p.shape[-1]
+    pos = torch.linspace(0.0, 1.0, k)
+    if readout == "argmax":
+        return pos[p.argmax(-1)]
+    if readout == "mean":
+        return (p * pos).sum(-1) / p.sum(-1)
+    edges = ((torch.arange(k + 1, dtype=torch.float32) - 0.5) / (k - 1)).clamp(0.0, 1.0)
+    cdf = p.cumsum(-1) / p.sum(-1, keepdim=True)
+    j = (cdf < 0.5).sum(-1).clamp(max=k - 1)
+    before = cdf.gather(-1, (j - 1).clamp(min=0).unsqueeze(-1)).squeeze(-1) * (j > 0)
+    mass = p.gather(-1, j.unsqueeze(-1)).squeeze(-1) / p.sum(-1)
+    frac = ((0.5 - before) / mass.clamp(min=1e-12)).clamp(0.0, 1.0)
+    return edges[j] + frac * (edges[j + 1] - edges[j])
+
+
+def decode_raw(probs: dict, machines: list, vocab: dict, readout: str) -> list:
+    """probs[h]: (n_regions, draws, n_bins) -> [region][draw] -> {head: setting valid on that machine}."""
+    units = {h: readout_unit(probs[h], readout).numpy() for h in UNIT_HEADS}
+    sched = probs["sched"].argmax(-1).numpy()
+    n, draws = sched.shape
+    return [[{h: vocab["sched"][sched[i, d]] if h == "sched" else snap(h, units[h][i, d], machines[i])
+              for h in HEADS} for d in range(draws)] for i in range(n)]
+
+
+def decode_configs(probs: dict, machines: list, vocab: dict, readout: str) -> np.ndarray:
+    """Like decode_raw, as (n_regions, draws, 4) indices into the vocabulary (for scoring)."""
+    return np.array([[[vocab[h].index(cfg[h]) for h in HEADS] for cfg in draws]
+                     for draws in decode_raw(probs, machines, vocab, readout)])
+
+
+def sweep_frequencies(fmin: int, fmax: int, step: int) -> tuple:
+    """The frequencies scan.sh sweeps for a hardware range: the exact maximum (possibly a turbo
+    marker), then every step below it down to the rounded minimum (never below 1 GHz)."""
+    start = max((fmin // step) * step, SWEEP_MIN_KHZ)
+    top = (fmax // step) * step
+    return tuple(sorted({fmax, *range(top, start - 1, -step)}))
+
+
+def inference_machine(opts: dict, df: pd.DataFrame, chunk_max: int) -> Machine:
+    """The machine to predict for: explicit options, else this machine (like scan.sh), else the
+    range spanned by the observations."""
+    if opts.get("freq_range"):
+        fmin, fmax = opts["freq_range"]
+    else:
+        try:
+            fmin = int((CPUFREQ_DIR / "cpuinfo_min_freq").read_text())
+            fmax = int((CPUFREQ_DIR / "cpuinfo_max_freq").read_text())
+        except (OSError, ValueError):
+            seen = sorted(int(f) for f in df["frequency"].unique()) if "frequency" in df.columns else []
+            if len(seen) < 2:
+                sys.exit("cannot determine the frequency range of the target machine (no cpufreq in sysfs "
+                         "and the observations use one frequency); pass --freq-range MIN_KHZ MAX_KHZ")
+            fmin, fmax = seen[0], seen[-1]
+    if fmax <= fmin:
+        sys.exit(f"invalid frequency range {fmin}..{fmax} kHz")
+    tmax = int(opts.get("max_threads") or os.cpu_count())
+    pow2 = lambda top: sorted({2 ** k for k in range(int(math.log2(top)) + 1)} | {top})
+    return Machine(threads=tuple(pow2(tmax)), chunk=tuple(pow2(chunk_max)),
+                   frequency=sweep_frequencies(fmin, fmax, opts.get("freq_step") or 200000),
+                   chunk_max=int(chunk_max))
+
+
+def training_machines(frames: list, vocab: dict) -> list:
+    """One Machine per application, from the settings its sweep covers."""
+    return [Machine(threads=tuple(sorted(int(v) for v in f["threads"].unique())),
+                    chunk=tuple(sorted(int(v) for v in f["chunk"].unique())),
+                    frequency=tuple(sorted(int(v) for v in f["frequency"].unique())),
+                    chunk_max=int(max(vocab["chunk"])))
+            for f in frames]
 
 
 def discover_apps(root: Path) -> list[Path]:
@@ -113,23 +262,18 @@ def build_vocab(frames: list[pd.DataFrame]) -> dict:
     }
 
 
-def _norm(x, lo, hi):
-    return 2.0 * (x - lo) / (hi - lo) - 1.0 if hi > lo else np.zeros_like(x, dtype=float)
-
-
-def context_features(threads, sched, chunk, freq, vocab: dict) -> np.ndarray:
-    """Encode the measured-under configuration as 4 values in roughly [-1, 1]."""
-    threads, chunk, freq = (np.asarray(a, dtype=float) for a in (threads, chunk, freq))
+def context_features(threads, sched, chunk, freq, vocab: dict, machine: Machine) -> np.ndarray:
+    """Encode the measured-under configuration as 4 values in roughly [-1, 1] (relative to the machine)."""
     unknown = set(map(str, sched)) - set(vocab["sched"])
     if unknown:
         raise ValueError(f"unknown sched value(s) {sorted(unknown)}; model knows {vocab['sched']}")
     sched_idx = np.array([vocab["sched"].index(str(s)) for s in sched], dtype=float)
     n_sched = len(vocab["sched"])
     cols = [
-        _norm(np.log2(threads), math.log2(min(vocab["threads"])), math.log2(max(vocab["threads"]))),
+        2.0 * to_unit("threads", np.asarray(threads), machine) - 1.0,
         2.0 * sched_idx / (n_sched - 1) - 1.0 if n_sched > 1 else np.zeros_like(sched_idx),
-        _norm(np.log2(chunk), math.log2(min(vocab["chunk"])), math.log2(max(vocab["chunk"]))),
-        _norm(freq, min(vocab["frequency"]), max(vocab["frequency"])),
+        2.0 * to_unit("chunk", np.asarray(chunk), machine) - 1.0,
+        2.0 * to_unit("frequency", np.asarray(freq), machine) - 1.0,
     ]
     return np.stack(cols, axis=1).astype(np.float32)
 
@@ -159,9 +303,10 @@ def load_regions(data_dir: Path, features: tuple) -> tuple[list[Region], dict]:
             print(f"[warn] {d.name}: dropped {before - len(df)} rows with missing/inf values")
         frames.append(df)
     vocab = build_vocab(frames)
+    machines = training_machines(frames, vocab)
 
     regions: list[Region] = []
-    for d, df in zip(apps, frames):
+    for d, df, machine in zip(apps, frames, machines):
         with open(d / "best_per_region.json") as fh:
             best = json.load(fh)
         app = app_name(d)
@@ -174,7 +319,8 @@ def load_regions(data_dir: Path, features: tuple) -> tuple[list[Region], dict]:
                 key=f"{app}/{name}",
                 app=app,
                 feats=g[list(features)].to_numpy(dtype=np.float64),
-                ctx=context_features(g["threads"], g["sched"], g["chunk"], g["frequency"], vocab),
+                ctx=context_features(g["threads"], g["sched"], g["chunk"], g["frequency"], vocab, machine),
+                machine=machine,
             )
             for target in TARGETS:
                 lab = entry.get(target)
@@ -310,26 +456,42 @@ def soft_marginals(grid: np.ndarray, tau: float) -> list[np.ndarray]:
     return [w.sum(axis=tuple(a for a in range(w.ndim) if a != j)) for j in range(w.ndim)]
 
 
-def train_model(train: list[Region], target: str, vocab: dict, args, tag: str = ""):
+def build_targets(train: list[Region], target: str, vocab: dict, axes: dict, args) -> dict:
+    """Per-head target distributions: the JSON label placed on the head's axis (smoothed over
+    neighbouring bins), blended with distributions derived from the measured grid."""
+    bins = axes["bins"]
+    sigma = {"threads": args.thread_sigma, "chunk": args.chunk_sigma, "frequency": args.freq_sigma}
+    tgt = {}
+    for j, h in enumerate(HEADS):
+        idx = [r.labels[target][j] for r in train]
+        if h == "sched":
+            tgt[h] = torch.eye(len(vocab[h]))[torch.tensor(idx)]
+            continue
+        u = [float(to_unit(h, vocab[h][i], r.machine)) for i, r in zip(idx, train)]
+        tgt[h] = torch.from_numpy(unit_to_dist(u, bins[h])).float() @ soft_label_matrix(bins[h], sigma[h])
+    if args.soft_tau > 0:
+        per_region = [soft_marginals(r.perf[target], args.soft_tau) for r in train]
+        for j, h in enumerate(HEADS):
+            if h == "sched":
+                grid = np.stack([m[j] for m in per_region])
+            else:
+                grid = np.stack([m[j] @ bin_matrix(h, vocab, r.machine, bins[h])
+                                 for m, r in zip(per_region, train)])
+            tgt[h] = args.hard_weight * tgt[h] + (1.0 - args.hard_weight) * torch.tensor(grid, dtype=torch.float32)
+    return tgt
+
+
+def train_model(train: list[Region], target: str, vocab: dict, axes: dict, args, tag: str = ""):
     torch.manual_seed(args.seed)
     gen = torch.Generator().manual_seed(args.seed)
     train = [r for r in train if target in r.labels]
     pre = Preproc.fit(np.concatenate([r.feats for r in train]))
     xpad, nrows = build_tensors(train, pre, not args.no_config_context)
-    labels = torch.from_numpy(np.stack([r.labels[target] for r in train]))
-    head_sizes = {h: len(vocab[h]) for h in HEADS}
-    model = MODELS[args.model](xpad.shape[2], args.hidden, args.layers, args.dropout, head_sizes)
+    model = MODELS[args.model](xpad.shape[2], args.hidden, args.layers, args.dropout, head_sizes(vocab, axes))
     steps_per_epoch = math.ceil(len(train) * args.samples_per_region / args.batch_size)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * steps_per_epoch)
-    # JSON label (optionally smoothed over neighbouring frequencies) ...
-    tgt = {h: soft_label_matrix(n, args.freq_sigma if h == "frequency" else 0.0)[labels[:, j]]
-           for j, (h, n) in enumerate(head_sizes.items())}
-    if args.soft_tau > 0:  # ... blended with targets derived from the measured grid
-        per_region = [soft_marginals(r.perf[target], args.soft_tau) for r in train]
-        for j, h in enumerate(HEADS):
-            grid_tgt = torch.tensor(np.stack([m[j] for m in per_region]), dtype=torch.float32)
-            tgt[h] = args.hard_weight * tgt[h] + (1.0 - args.hard_weight) * grid_tgt
+    tgt = build_targets(train, target, vocab, axes, args)
 
     history = []
     for epoch in range(1, args.epochs + 1):
@@ -372,10 +534,6 @@ def predict_proba(model, xpad, nrows, length, draws, seed):
         for h, lg in model(x, lens).items():
             outs[h].append(torch.softmax(lg, -1))
     return {h: torch.stack(v, 1) for h, v in outs.items()}
-
-
-def argmax_config(probs: dict) -> np.ndarray:
-    return torch.stack([probs[h].argmax(-1) for h in HEADS], -1).numpy()
 
 
 def ratio_to_oracle(region: Region, target: str, cfg) -> float:
@@ -434,7 +592,7 @@ def make_folds(regions: list[Region], mode: str, seed: int):
     return [(f"fold{i}", sorted(perm[i::k].tolist())) for i in range(k)]
 
 
-def cross_validate(regions, target, vocab, args) -> pd.DataFrame:
+def cross_validate(regions, target, vocab, axes, args) -> pd.DataFrame:
     regions = [r for r in regions if target in r.labels]
     rows = []
     for name, test_idx in make_folds(regions, args.cv_mode, args.seed):
@@ -444,14 +602,22 @@ def cross_validate(regions, target, vocab, args) -> pd.DataFrame:
         if not train:
             continue
         t0 = time.time()
-        model, pre, _ = train_model(train, target, vocab, args, tag=f"[{target}/{name}]")
+        model, pre, _ = train_model(train, target, vocab, axes, args, tag=f"[{target}/{name}]")
         xpad, nrows = build_tensors(test, pre, not args.no_config_context)
+        machines = [r.machine for r in test]
+
+        def decode(probs, readout=args.readout):
+            return decode_configs(probs, machines, vocab, readout)
+
         for length in sorted({1, args.max_len}):
             probs = predict_proba(model, xpad, nrows, length, args.eval_draws, args.seed + 1)
-            rows += score_rows(f"{args.model.upper()} L={length}", test, target, argmax_config(probs))
+            rows += score_rows(f"{args.model.upper()} L={length}", test, target, decode(probs))
             if length == args.max_len:
                 mean_probs = {h: p.mean(1, keepdim=True) for h, p in probs.items()}
-                rows += score_rows(avg_method_name(args), test, target, argmax_config(mean_probs))
+                rows += score_rows(avg_method_name(args), test, target, decode(mean_probs))
+                if args.readout != "median":
+                    rows += score_rows(avg_method_name(args, "median"), test, target,
+                                       decode(mean_probs, "median"))
         for label, cfg in zip(BASELINES, (majority_config(train, target), global_best_config(train, target))):
             rows += score_rows(label, test, target, np.tile(cfg, (len(test), 1, 1)))
         rows += score_rows("oracle", test, target, np.stack([r.labels[target] for r in test])[:, None, :])
@@ -459,8 +625,8 @@ def cross_validate(regions, target, vocab, args) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def avg_method_name(args) -> str:
-    return f"{args.model.upper()} L={args.max_len}, avg of {args.eval_draws} subsets"
+def avg_method_name(args, readout: str | None = None) -> str:
+    return f"{args.model.upper()} L={args.max_len}, avg of {args.eval_draws} subsets, {readout or args.readout} readout"
 
 
 def report_cv(df: pd.DataFrame, target: str, n_regions: int, args):
@@ -480,13 +646,15 @@ def report_cv(df: pd.DataFrame, target: str, n_regions: int, args):
 # --------------------------------------------------------------------------- #
 # Checkpoints
 # --------------------------------------------------------------------------- #
-def save_checkpoint(path: Path, model, pre, vocab, target, args, n_regions, features):
+def save_checkpoint(path: Path, model, pre, vocab, axes, target, args, n_regions, features):
     torch.save({
         "state_dict": model.state_dict(),
         "model": args.model,
         "arch": {"in_dim": model.in_dim, "hidden": args.hidden, "layers": args.layers,
                  "dropout": args.dropout},
         "vocab": vocab,
+        "axes": axes,
+        "readout": args.readout,
         "features": list(features),
         "use_config_context": not args.no_config_context,
         "max_len": args.max_len,
@@ -498,9 +666,12 @@ def save_checkpoint(path: Path, model, pre, vocab, target, args, n_regions, feat
 
 def load_checkpoint(path: Path):
     ck = torch.load(path, map_location="cpu", weights_only=True)
-    head_sizes = {h: len(ck["vocab"][h]) for h in HEADS}
+    if "axes" not in ck:
+        sys.exit(f"{path} was trained with per-value classes for threads/chunk/frequency and cannot "
+                 f"transfer to other settings or machines; retrain with 'train'")
     a = ck["arch"]
-    model = MODELS[ck.get("model", "gru")](a["in_dim"], a["hidden"], a["layers"], a["dropout"], head_sizes)
+    model = MODELS[ck.get("model", "gru")](a["in_dim"], a["hidden"], a["layers"], a["dropout"],
+                                           head_sizes(ck["vocab"], ck["axes"]))
     model.load_state_dict(ck["state_dict"])
     model.eval()
     return model, ck
@@ -523,6 +694,10 @@ def cmd_train(args):
     print(f"Features: {', '.join(features)}"
           f"{'' if args.no_config_context else ' + measured-under config (threads, sched, chunk, frequency)'}")
     print("Config space: " + ", ".join(f"{h}={len(vocab[h])}" for h in HEADS))
+    axes = default_axes(vocab, args)
+    print("Output heads: " + ", ".join(f"{h}={n} {'classes' if h == 'sched' else 'bins'}"
+                                       for h, n in head_sizes(vocab, axes).items())
+          + f"  (readout: {args.readout})")
     print(f"Model: {args.model} ({args.layers} layer{'s' if args.layers != 1 else ''}, hidden {args.hidden}, "
           f"{args.max_len} observation{'s' if args.max_len != 1 else ''} per sample)")
 
@@ -531,17 +706,17 @@ def cmd_train(args):
         n = sum(target in r.labels for r in regions)
         if args.cv_mode != "none":
             print(f"\n--- {target}: cross-validation ---")
-            cv = cross_validate(regions, target, vocab, args)
+            cv = cross_validate(regions, target, vocab, axes, args)
             report_cv(cv, target, n, args)
             summary[target] = json.loads(summarize(cv).round(3).to_json(orient="index"))
         if args.cv_only:
             continue
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n--- {target}: training final model on all {n} regions ---")
-        model, pre, hist = train_model([r for r in regions if target in r.labels], target, vocab, args,
+        model, pre, hist = train_model([r for r in regions if target in r.labels], target, vocab, axes, args,
                                        tag=f"[{target}/final]")
         path = out_dir / f"model_{target}.pt"
-        save_checkpoint(path, model, pre, vocab, target, args, n, features)
+        save_checkpoint(path, model, pre, vocab, axes, target, args, n, features)
         print(f"  final loss {hist[-1]:.4f}  ->  saved {path}")
     if summary and not args.cv_only:
         with open(out_dir / "cv_metrics.json", "w") as fh:
@@ -549,8 +724,11 @@ def cmd_train(args):
         print(f"\nCV metrics written to {out_dir / 'cv_metrics.json'}")
 
 
-def predict_configs(df: pd.DataFrame, model_dir, targets, draws: int, seed: int, source: str) -> list[dict]:
-    """Best config per region and target. df has one row per observation (see 'predict' help)."""
+def predict_configs(df: pd.DataFrame, model_dir, targets, draws: int, seed: int, source: str,
+                    opts: dict | None = None) -> list[dict]:
+    """Best config per region and target. df has one row per observation (see 'predict' help).
+    opts describes the target machine (max_threads, freq_range, freq_step) and the readout."""
+    opts = opts or {}
     out_rows = []
     loaded = 0
     for target in targets:
@@ -565,13 +743,19 @@ def predict_configs(df: pd.DataFrame, model_dir, targets, draws: int, seed: int,
         missing = [c for c in need if c not in df.columns]
         if missing:
             sys.exit(f"{source} is missing columns required by the {target} model: {missing}")
+        machine = inference_machine(opts, df, ck["axes"]["chunk_max"])
+        readout = opts.get("readout") or ck["readout"]
+        if loaded == 1:
+            print(f"Target machine: up to {max(machine.threads)} threads, "
+                  f"{min(machine.frequency) / 1e6:.2f}-{max(machine.frequency) / 1e6:.2f} GHz "
+                  f"({len(machine.frequency)} steps); readout: {readout}")
         pre = Preproc.from_state(ck["preproc"])
         gen = torch.Generator().manual_seed(seed)
         for region, g in df.dropna(subset=need).groupby("region", sort=False):
             x = pre(g[features].to_numpy(dtype=np.float64))
             if ck["use_config_context"]:
                 x = np.concatenate([x, context_features(g["threads"], g["sched"], g["chunk"],
-                                                        g["frequency"], vocab)], axis=1)
+                                                        g["frequency"], vocab, machine)], axis=1)
             x = torch.from_numpy(x)
             with torch.no_grad():
                 if len(x) <= max_len:
@@ -581,20 +765,25 @@ def predict_configs(df: pd.DataFrame, model_dir, targets, draws: int, seed: int,
                                for _ in range(draws)]
                 probs = [{h: torch.softmax(lg, -1) for h, lg in
                           model(b, torch.tensor([b.shape[1]])).items()} for b in batches]
-            row = {"region": region, "target": target, "n_observations": len(x)}
-            for h in HEADS:
-                row[h] = vocab[h][int(torch.stack([p[h] for p in probs]).mean(0).argmax())]
-            out_rows.append(row)
+            mean = {h: torch.stack([p[h] for p in probs]).mean(0)[:, None] for h in HEADS}
+            cfg = decode_raw(mean, [machine], vocab, readout)[0][0]
+            out_rows.append({"region": region, "target": target, "n_observations": len(x), **cfg})
     if not loaded:
         sys.exit(f"no model_<target>.pt for {', '.join(targets)} in {model_dir}; run 'train' first")
     return out_rows
+
+
+def machine_opts(args) -> dict:
+    return {"max_threads": args.max_threads, "freq_range": args.freq_range,
+            "freq_step": args.freq_step, "readout": args.readout}
 
 
 def cmd_predict(args):
     df = pd.read_csv(args.input)
     if "region" not in df.columns:
         df["region"] = "region"
-    result = pd.DataFrame(predict_configs(df, args.model_dir, args.targets, args.draws, args.seed, args.input))
+    result = pd.DataFrame(predict_configs(df, args.model_dir, args.targets, args.draws, args.seed, args.input,
+                                          machine_opts(args)))
     if args.output:
         result.to_csv(args.output, index=False)
         print(f"Wrote {len(result)} predictions to {args.output}")
@@ -682,7 +871,8 @@ def build_config(obs: pd.DataFrame, preds: list[dict], meta: dict) -> dict:
 
 def cmd_generate(args):
     obs = load_snapshots(args.snapshots, args.stat, args.skip_first, args.time_source)
-    preds = predict_configs(obs, args.model_dir, args.targets, args.draws, args.seed, "snapshot executions")
+    preds = predict_configs(obs, args.model_dir, args.targets, args.draws, args.seed, "snapshot executions",
+                            machine_opts(args))
     skipped = sorted(set(obs["region"]) - {p["region"] for p in preds})
     if skipped:
         print(f"[warn] no complete PMU metrics for {len(skipped)} region(s), left out: "
@@ -713,6 +903,17 @@ def cmd_generate(args):
           f"Apply with: ORBIT_OPTIMIZED_CONF={args.output} ORBIT_OPTIMIZE_POLICY=<fastest|edp> "
           f"LD_PRELOAD=<liborbit.so> ./app\n"
           f"(ORBIT only tunes regions with total_time_s above ORBIT_TIME_THRESHOLD, default 100ms)")
+
+
+def add_machine_args(p: argparse.ArgumentParser):
+    p.add_argument("--max-threads", type=int, default=None,
+                   help="threads of the target machine (default: nproc of this machine, as in scan.sh)")
+    p.add_argument("--freq-range", type=int, nargs=2, metavar=("MIN_KHZ", "MAX_KHZ"), default=None,
+                   help="hardware frequency range of the target machine in kHz (default: this machine's "
+                        "cpufreq range, as in scan.sh)")
+    p.add_argument("--freq-step", type=int, default=200000, help="frequency step in kHz (scan.sh: 200000)")
+    p.add_argument("--readout", choices=READOUTS, default=None,
+                   help="override the readout stored in the model (median, mean or argmax)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -746,7 +947,17 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--weight-decay", type=float, default=1e-2)
     t.add_argument("--noise", type=float, default=0.05, help="gaussian input noise (std, standardised units)")
     t.add_argument("--freq-sigma", type=float, default=1.0,
-                   help="label smoothing width (in frequency steps) for the frequency head; 0 disables")
+                   help="label smoothing width (in bins) for the frequency head; 0 disables")
+    t.add_argument("--thread-sigma", type=float, default=0.0, help="same for the threads head")
+    t.add_argument("--chunk-sigma", type=float, default=0.0, help="same for the chunk head")
+    t.add_argument("--freq-bins", type=int, default=21,
+                   help="bins of the frequency axis (fraction of the machine's range); 21 = 5%% steps")
+    t.add_argument("--thread-bins", type=int, default=17,
+                   help="bins of the threads axis (fraction of the machine's cores); 17 = 1/16 steps")
+    t.add_argument("--readout", choices=READOUTS, default="argmax",
+                   help="how a bin distribution becomes a setting: argmax = most likely bin, median/mean = "
+                        "continuous position that can fall between bins; the result is then snapped to a "
+                        "valid setting. Used for cross-validation and stored in the model as default")
     t.add_argument("--soft-tau", type=float, default=0.3,
                    help="if > 0, also use soft per-head targets built from all_configs.csv (every config "
                         "weighted by exp(-(ratio_to_best-1)/tau)); 0 = JSON labels only")
@@ -764,6 +975,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--draws", type=int, default=32, help="random subsets averaged when a region has > max-len rows")
     q.add_argument("--seed", type=int, default=0)
     q.add_argument("--output", help="write predictions to this CSV instead of stdout")
+    add_machine_args(q)
     q.set_defaults(func=cmd_predict)
 
     g = sub.add_parser("generate", help="read snapshot executions, write a best_per_region.json-style "
@@ -780,6 +992,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--time-source", choices=("energy", "pmu"), default="energy")
     g.add_argument("--draws", type=int, default=32, help="random subsets averaged when a region has > max-len rows")
     g.add_argument("--seed", type=int, default=0)
+    add_machine_args(g)
     g.set_defaults(func=cmd_generate)
     return p
 
