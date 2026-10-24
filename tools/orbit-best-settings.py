@@ -61,7 +61,9 @@ def load_readings(path):
         for r in readings:
             for m in r.get("measurements", []):
                 try:
-                    meas[m["name"]] += float(m["value"])
+                    val = float(m["value"])
+                    if not math.isnan(val):
+                        meas[m["name"]] += val
                 except (ValueError, KeyError):
                     pass
         dur = sum(r["duration"] for r in readings) / len(readings)

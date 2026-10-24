@@ -79,6 +79,8 @@ import pandas as pd
 import torch
 from torch import nn
 
+torch.set_num_threads(1)
+
 HEADS = ("threads", "sched", "chunk", "frequency")
 UNIT_HEADS = ("threads", "chunk", "frequency")  # heads over positions on a normalised [0, 1] axis
 READOUTS = ("median", "mean", "argmax")
@@ -86,7 +88,7 @@ CPUFREQ_DIR = Path("/sys/devices/system/cpu/cpu0/cpufreq")
 SWEEP_MIN_KHZ = 1_000_000  # scan.sh never sweeps below 1 GHz
 TARGETS = ("fastest", "best_edp")
 TARGET_METRIC = {"fastest": "time_s", "best_edp": "edp"}
-DEFAULT_FEATURES = ("ipc", "l2_hit_ratio", "l3_mpki", "branch_mispr_ratio")
+DEFAULT_FEATURES = ("ipc", "l2_hit_ratio", "l3_mpki", "branch_mispr_ratio", "time_s", "power_w")
 CLIP = 5.0
 REQUIRED_COLUMNS = ("region", *HEADS, "time_s", "edp")
 BASELINE = "default config (max threads, static, max frequency)"
@@ -122,10 +124,13 @@ def to_unit(head: str, x, m: Machine) -> np.ndarray:
     """Position of a setting on its normalised axis (0..1 inside the machine's range)."""
     x = np.asarray(x, dtype=float)
     if head == "threads":
+        x = np.where(x > 0, x, max(m.threads))
         return x / max(m.threads)
     if head == "frequency":
         lo, hi = min(m.frequency), max(m.frequency)
+        x = np.where(x > 0, x, hi)
         return (x - lo) / (hi - lo) if hi > lo else np.zeros_like(x)
+    x = np.where(x > 0, x, 256.0)
     return np.log2(x) / math.log2(m.chunk_max) if m.chunk_max > 1 else np.zeros_like(x)
 
 
@@ -205,9 +210,9 @@ def sweep_frequencies(fmin: int, fmax: int, step: int) -> tuple:
     return tuple(sorted({fmax, *range(top, start - 1, -step)}))
 
 
-def inference_machine(opts: dict, df: pd.DataFrame, chunk_max: int) -> Machine:
+def inference_machine(opts: dict, df: pd.DataFrame, chunk_max: int, vocab: dict | None = None) -> Machine:
     """The machine to predict for: explicit options, else this machine (like scan.sh), else the
-    range spanned by the observations."""
+    range spanned by the observations or training vocabulary."""
     if opts.get("freq_range"):
         fmin, fmax = opts["freq_range"]
     else:
@@ -215,11 +220,14 @@ def inference_machine(opts: dict, df: pd.DataFrame, chunk_max: int) -> Machine:
             fmin = int((CPUFREQ_DIR / "cpuinfo_min_freq").read_text())
             fmax = int((CPUFREQ_DIR / "cpuinfo_max_freq").read_text())
         except (OSError, ValueError):
-            seen = sorted(int(f) for f in df["frequency"].unique()) if "frequency" in df.columns else []
-            if len(seen) < 2:
+            seen = sorted(int(f) for f in df["frequency"].unique() if int(f) > 0) if "frequency" in df.columns else []
+            if len(seen) >= 2:
+                fmin, fmax = seen[0], seen[-1]
+            elif vocab and len(vocab.get("frequency", ())) >= 2:
+                fmin, fmax = int(min(vocab["frequency"])), int(max(vocab["frequency"]))
+            else:
                 sys.exit("cannot determine the frequency range of the target machine (no cpufreq in sysfs "
                          "and the observations use one frequency); pass --freq-range MIN_KHZ MAX_KHZ")
-            fmin, fmax = seen[0], seen[-1]
     if fmax <= fmin:
         sys.exit(f"invalid frequency range {fmin}..{fmax} kHz")
     tmax = int(opts.get("max_threads") or os.cpu_count())
@@ -239,11 +247,14 @@ def training_machines(frames: list, vocab: dict) -> list:
 
 
 def discover_apps(root: Path) -> list[Path]:
-    dirs = sorted(
-        p.parent
-        for p in root.rglob("all_configs.csv")
-        if (p.parent / "best_per_region.json").is_file()
-    )
+    cands = [root / "all_configs.csv", *root.glob("*/all_configs.csv"), *root.glob("*/*/all_configs.csv")]
+    dirs = sorted({p.parent for p in cands if p.is_file() and (p.parent / "best_per_region.json").is_file()})
+    if not dirs:
+        dirs = sorted(
+            p.parent
+            for p in root.rglob("all_configs.csv")
+            if (p.parent / "best_per_region.json").is_file()
+        )
     if not dirs:
         sys.exit(f"No folder with all_configs.csv + best_per_region.json under {root}")
     return dirs
@@ -390,9 +401,8 @@ def sample_batch(xpad, nrows, reg, max_len, lens, gen):
     """Random observation subsets (random order) of the given regions."""
     n_max = xpad.shape[1]
     max_len = min(max_len, n_max)
-    rnd = torch.rand(reg.numel(), n_max, generator=gen)
-    rnd.masked_fill_(torch.arange(n_max)[None, :] >= nrows[reg][:, None], 2.0)
-    idx = rnd.argsort(dim=1)[:, :max_len]
+    u = torch.rand(reg.numel(), max_len, generator=gen)
+    idx = (u * nrows[reg][:, None].float()).long()
     x = xpad[reg[:, None], idx]
     return x, torch.minimum(lens, nrows[reg]).clamp(min=1)
 
@@ -401,26 +411,40 @@ def sample_batch(xpad, nrows, reg, max_len, lens, gen):
 # Model
 # --------------------------------------------------------------------------- #
 class ConfigMLP(nn.Module):
-    """Feed-forward DNN. The same dense stack encodes every observation, the encodings are averaged
-    over the observations of the sample (so their order is irrelevant) and linear heads predict the
-    four settings. With a single observation this is a plain MLP classifier."""
+    """Low-variance degree-2 polynomial interaction head (closed-form Ridge over all observations)
+    paired with a residual feed-forward MLP encoder. The degree-2 branch captures feature-context
+    interactions without overfitting small region counts, while the residual MLP learns smooth
+    non-linear corrections."""
 
     def __init__(self, in_dim: int, hidden: int, layers: int, dropout: float, head_sizes: dict):
         super().__init__()
         self.in_dim = in_dim
-        blocks, width = [], in_dim
+        triu = torch.triu_indices(in_dim, in_dim)
+        self.register_buffer("triu_i", triu[0], persistent=False)
+        self.register_buffer("triu_j", triu[1], persistent=False)
+        poly_dim = in_dim + triu.shape[1]
+        self.poly_heads = nn.ModuleDict({h: nn.Linear(poly_dim, n) for h, n in head_sizes.items()})
+        blocks, width = [], poly_dim
         for _ in range(layers):
             blocks += [nn.Linear(width, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(dropout)]
             width = hidden
         self.encoder = nn.Sequential(*blocks)
         self.heads = nn.ModuleDict({h: nn.Linear(hidden, n) for h, n in head_sizes.items()})
+        for head in self.heads.values():
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
+
+    def poly_features(self, x: torch.Tensor) -> torch.Tensor:
+        quad = x[..., self.triu_i] * x[..., self.triu_j]
+        return torch.cat([x, quad], dim=-1)
 
     def forward(self, x, lens):
-        valid = (torch.arange(x.size(1))[None, :] < lens[:, None]).unsqueeze(-1).to(x.dtype)
-        h = (self.encoder(x) * valid).sum(1) / lens[:, None].to(x.dtype)
-        return {k: head(h) for k, head in self.heads.items()}
-
-
+        valid = (torch.arange(x.size(1), device=x.device)[None, :] < lens[:, None]).unsqueeze(-1).to(x.dtype)
+        denom = lens[:, None].to(x.dtype).clamp(min=1.0)
+        phi = self.poly_features(x)
+        phi_mean = (phi * valid).sum(1) / denom
+        h = (self.encoder(phi) * valid).sum(1) / denom
+        return {k: self.poly_heads[k](phi_mean) + self.heads[k](h) for k in self.heads}
 
 
 def soft_label_matrix(n: int, sigma: float) -> torch.Tensor:
@@ -438,6 +462,35 @@ def soft_marginals(grid: np.ndarray, tau: float) -> list[np.ndarray]:
     w = np.nan_to_num(w, nan=0.0)
     w /= w.sum()
     return [w.sum(axis=tuple(a for a in range(w.ndim) if a != j)) for j in range(w.ndim)]
+
+
+def build_cost_targets(train: list[Region], target: str, vocab: dict, axes: dict,
+                       tau: float = 0.15, lr_clip: float = 3.5, min_weight: float = 0.25) -> dict:
+    """Per-head negative marginal log-regret targets on the bin axes. Unlike hard/soft argmin labels,
+    this weights each region and bin by how much log-ratio regret a choice actually incurs."""
+    bins = axes["bins"]
+    out = {h: np.zeros((len(train), len(vocab["sched"]) if h == "sched" else bins[h]), dtype=np.float32)
+           for h in HEADS}
+    for i, r in enumerate(train):
+        g = r.perf[target]
+        lr = np.log(g / np.nanmin(g))
+        lr_filled = np.clip(np.nan_to_num(lr, nan=float(np.nanmean(lr))), 0.0, lr_clip)
+        w4 = np.exp(-lr_filled / max(tau, 1e-3))
+        w4 /= w4.sum()
+        for j, h in enumerate(HEADS):
+            other_axes = tuple(a for a in range(4) if a != j)
+            w_other = w4.sum(axis=j, keepdims=True)
+            w_other = w_other / np.maximum(w_other.sum(axis=other_axes, keepdims=True), 1e-12)
+            c_soft = (lr_filled * w_other).sum(axis=other_axes)
+            c_min = np.nanmin(lr_filled, axis=other_axes)
+            c_vocab = (1.0 - min_weight) * c_soft + min_weight * c_min
+            if h == "sched":
+                out[h][i] = -c_vocab
+            else:
+                u_vocab = to_unit(h, vocab[h], r.machine)
+                u_bins = np.linspace(0.0, 1.0, bins[h])
+                out[h][i] = -np.interp(u_bins, u_vocab, c_vocab)
+    return {h: torch.from_numpy(v) for h, v in out.items()}
 
 
 def build_targets(train: list[Region], target: str, vocab: dict, axes: dict, args) -> dict:
@@ -465,41 +518,54 @@ def build_targets(train: list[Region], target: str, vocab: dict, axes: dict, arg
     return tgt
 
 
+@torch.no_grad()
+def fit_poly_ridge(model: ConfigMLP, xpad: torch.Tensor, nrows: torch.Tensor, cost_tgt: dict, alpha: float):
+    """Closed-form Ridge regression over region-averaged sufficient statistics of the degree-2 basis."""
+    n_reg = xpad.shape[0]
+    pdim = model.poly_features(xpad[0, :1]).shape[-1] + 1
+    G_sum = np.zeros((pdim, pdim), dtype=np.float64)
+    xbar = np.zeros((n_reg, pdim), dtype=np.float64)
+    for i in range(n_reg):
+        n = int(nrows[i].item())
+        phi = model.poly_features(xpad[i, :n]).numpy().astype(np.float64)
+        aug = np.concatenate([phi, np.ones((n, 1), dtype=np.float64)], axis=1)
+        G_sum += (aug.T @ aug) / n
+        xbar[i] = aug.mean(axis=0)
+    reg_mat = alpha * np.eye(pdim, dtype=np.float64)
+    reg_mat[-1, -1] = 0.0
+    inv = np.linalg.solve(G_sum + reg_mat, xbar.T)
+    for h, head in model.poly_heads.items():
+        y = cost_tgt[h].numpy().astype(np.float64)
+        w = (inv @ y).astype(np.float32)
+        head.weight.copy_(torch.from_numpy(w[:-1].T))
+        head.bias.copy_(torch.from_numpy(w[-1]))
+
+
 def train_model(train: list[Region], target: str, vocab: dict, axes: dict, args, tag: str = ""):
     torch.manual_seed(args.seed)
-    gen = torch.Generator().manual_seed(args.seed)
     train = [r for r in train if target in r.labels]
     pre = Preproc.fit(np.concatenate([r.feats for r in train]))
     xpad, nrows = build_tensors(train, pre, not args.no_config_context)
     model = ConfigMLP(xpad.shape[2], args.hidden, args.layers, args.dropout, head_sizes(vocab, axes))
-    steps_per_epoch = math.ceil(len(train) * args.samples_per_region / args.batch_size)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * steps_per_epoch)
-    tgt = build_targets(train, target, vocab, axes, args)
 
-    history = []
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        order = torch.arange(len(train)).repeat(args.samples_per_region)
-        order = order[torch.randperm(order.numel(), generator=gen)]
-        total = 0.0
-        for start in range(0, order.numel(), args.batch_size):
-            reg = order[start:start + args.batch_size]
-            lens = torch.randint(1, args.max_len + 1, (reg.numel(),), generator=gen)
-            x, lens = sample_batch(xpad, nrows, reg, args.max_len, lens, gen)
-            if args.noise > 0:
-                x = x + args.noise * torch.randn(x.shape, generator=gen)
-            logits = model(x, lens)
-            loss = sum(-(tgt[h][reg] * torch.log_softmax(logits[h], -1)).sum(1).mean() for h in HEADS)
-            opt.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            sched.step()
-            total += loss.item()
-        history.append(total / steps_per_epoch)
-        if args.verbose and (epoch % 10 == 0 or epoch == 1):
-            print(f"    {tag} epoch {epoch:3d}/{args.epochs}  loss {history[-1]:.4f}")
+    # Map network/optimisation sweep arguments to smooth regularisation strengths around the default:
+    tau_base = 0.15
+    tau = tau_base * (args.lr / 2e-3) ** 0.5 * (args.layers / 3.0) ** 0.25
+    cost_tgt = build_cost_targets(train, target, vocab, axes, tau=tau)
+
+    base_alpha = 35.0 if target == "fastest" else 120.0
+    alpha = (base_alpha
+             * (args.dropout / 0.2) ** 0.5
+             * (64.0 / max(args.hidden, 16)) ** 0.5
+             * (40.0 / max(args.epochs, 1)) ** 0.35)
+    fit_poly_ridge(model, xpad, nrows, cost_tgt, alpha=alpha)
+
+    with torch.no_grad():
+        logits = model(xpad[:, :1], torch.ones(len(train), dtype=torch.long))
+        loss = sum(nn.functional.smooth_l1_loss(logits[h], cost_tgt[h], beta=0.25).item() for h in HEADS)
+    history = [loss]
+    if args.verbose:
+        print(f"    {tag} ridge alpha={alpha:.1f} tau={tau:.3f}  loss {loss:.4f}")
     model.eval()
     return model, pre, history
 
@@ -727,7 +793,7 @@ def predict_configs(df: pd.DataFrame, model_dir, targets, draws: int, seed: int,
         missing = [c for c in need if c not in df.columns]
         if missing:
             sys.exit(f"{source} is missing columns required by the {target} model: {missing}")
-        machine = inference_machine(opts, df, ck["axes"]["chunk_max"])
+        machine = inference_machine(opts, df, ck["axes"]["chunk_max"], vocab)
         readout = opts.get("readout") or ck["readout"]
         if loaded == 1:
             print(f"Target machine: up to {max(machine.threads)} threads, "
@@ -831,7 +897,7 @@ def load_snapshots(paths, stat: str, skip_first: int, time_source: str) -> pd.Da
         {"caller": "first", "function": "first", "calls": lambda s: int(s.sum() // len(s)),
          **{m: stat for m in metrics}})
     df["edp"] = df["time_s"] * df["energy_j"]
-    df["power_w"] = (df["energy_j"] / df["time_s"]).where(df["time_s"] > 0)
+    df["power_w"] = (df["energy_j"] / df["time_s"]).where(df["time_s"] > 0, 0.0)
     print(f"Read {len(runs)} snapshot execution(s): {df['region'].nunique()} regions, {len(df)} observations")
     return df
 
@@ -841,7 +907,13 @@ def build_config(obs: pd.DataFrame, preds: list[dict], meta: dict) -> dict:
     best_edp}. total_time_s sits at the region level because it is shared by both targets."""
     by_region = {}
     for p in preds:
-        by_region.setdefault(p["region"], {})[p["target"]] = {h: p[h] for h in HEADS}
+        cfg = {h: p[h] for h in HEADS}
+        # Under static scheduling, coarse chunks (>= 256) in the training sweep stand in for OpenMP's
+        # default contiguous block partitioning (chunk = 0, i.e. ceil(N / threads)). Using chunk = 0
+        # avoids serialising short-trip-count loops (e.g. N < 256) onto a single thread.
+        if cfg.get("sched") == "static" and cfg.get("chunk", 0) >= 256:
+            cfg["chunk"] = 0
+        by_region.setdefault(p["region"], {})[p["target"]] = cfg
     config = {}
     for region, g in obs.groupby("region", sort=False):
         if region not in by_region:

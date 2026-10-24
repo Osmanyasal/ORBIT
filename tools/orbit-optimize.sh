@@ -8,9 +8,13 @@
 #   --baseline             also measure the program once without ORBIT
 #   -h, --help
 # ORBIT_LIB overrides the liborbit.so path. OPTKIT_CLI overrides the bundled optkit-cli executable.
+# Default OpenMP settings (when unset or empty in the environment): OMP_NUM_THREADS=$(nproc), OMP_SCHEDULE=static.
 # Every run uses optkit-cli stat --cpu-energy; application output and energy reports are passed through.
 # The wall-clock summary includes application input loading and profiler overhead.
 set -euo pipefail
+
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$(nproc)}"
+export OMP_SCHEDULE="${OMP_SCHEDULE:-static}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORBIT_LIB="${ORBIT_LIB:-$HERE/../bin/Release/liborbit.so}"

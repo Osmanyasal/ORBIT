@@ -165,8 +165,12 @@ inline void apply_openmp_settings(const RegionConfig &config) {
 }
 
 inline void reset_openmp_settings() {
-    omp_set_num_threads(omp_get_max_threads());
-    omp_set_schedule(omp_sched_static, 0);
+    if (active_region) {
+        apply_openmp_settings(active_region->region.current);
+    } else {
+        omp_set_num_threads(ensure_runtime().default_threads);
+        omp_set_schedule(omp_sched_static, 0);
+    }
 }
 
 }  // namespace detail

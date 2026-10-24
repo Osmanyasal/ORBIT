@@ -1,0 +1,31 @@
+{
+  "kmeans.0x1abf": {
+    "caller": "0x401abf",
+    "function": "0x401490",
+    "calls": 501,
+    "total_time_s": 6.8553100023269655,
+    "fastest": {
+      "threads": 64,
+      "sched": "static",
+      "chunk": 64,
+      "frequency": 4000000
+    },
+    "best_edp": {
+      "threads": 64,
+      "sched": "static",
+      "chunk": 64,
+      "frequency": 3200000
+    }
+  },
+  "_prediction": {
+    "generated_by": "train_model.py generate",
+    "snapshots": [
+      "/home/yas0014/orbit/ORBIT/tools/orbit_kmeans/snapshot_20261024_204232"
+    ],
+    "targets": [
+      "best_edp",
+      "fastest"
+    ],
+    "note": "threads/sched/chunk/frequency are model predictions; total_time_s is calls x the best per-call time measured in the snapshot executions, not a prediction"
+  }
+}

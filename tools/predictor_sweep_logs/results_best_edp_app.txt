@@ -1,45 +1,45 @@
-ep20 1 (69.4, 37.3, 217.3) fixed: (71.5, 55.5, 233.4)
-ep20 0 (70.9, 37.4, 217.2) fixed: (71.5, 55.5, 233.4)
-h32 1 (69.7, 37.2, 225.3) fixed: (71.5, 55.5, 233.4)
-h32 0 (70.0, 37.3, 224.7) fixed: (71.5, 55.5, 233.4)
-l2 0 (71.2, 38.5, 217.5) fixed: (71.5, 55.5, 233.4)
-l2 1 (71.0, 39.0, 218.5) fixed: (71.5, 55.5, 233.4)
-drop0.1 0 (76.5, 41.0, 236.5) fixed: (71.5, 55.5, 233.4)
-drop0.1 1 (76.0, 39.6, 245.4) fixed: (71.5, 55.5, 233.4)
-base 0 (75.5, 39.1, 241.7) fixed: (71.5, 55.5, 233.4)
-base 1 (74.2, 40.3, 231.3) fixed: (71.5, 55.5, 233.4)
-lr1e-3 0 (68.5, 37.2, 207.8) fixed: (71.5, 55.5, 233.4)
-lr1e-3 1 (72.0, 38.7, 231.3) fixed: (71.5, 55.5, 233.4)
-drop0.4 1 (67.9, 37.2, 216.9) fixed: (71.5, 55.5, 233.4)
-drop0.4 0 (68.2, 37.3, 207.8) fixed: (71.5, 55.5, 233.4)
-l4 0 (76.3, 39.6, 225.6) fixed: (71.5, 55.5, 233.4)
-l4 1 (77.8, 40.6, 250.2) fixed: (71.5, 55.5, 233.4)
-h128 1 (81.1, 40.6, 259.6) fixed: (71.5, 55.5, 233.4)
-h128 0 (80.0, 40.7, 261.3) fixed: (71.5, 55.5, 233.4)
-ep80 1 (77.9, 40.2, 247.8) fixed: (71.5, 55.5, 233.4)
-ep80 0 (77.4, 38.4, 263.1) fixed: (71.5, 55.5, 233.4)
+l2 1 (55.3, 30.7, 164.3) fixed: (71.5, 55.5, 233.4)
+base 1 (55.4, 30.7, 164.3) fixed: (71.5, 55.5, 233.4)
+drop0.1 1 (55.6, 30.7, 164.3) fixed: (71.5, 55.5, 233.4)
+drop0.4 1 (55.1, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+h32 0 (55.1, 31.2, 161.6) fixed: (71.5, 55.5, 233.4)
+l4 1 (55.3, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+h32 1 (55.1, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+base 0 (55.5, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+drop0.1 0 (55.8, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+lr1e-3 0 (55.6, 30.7, 164.3) fixed: (71.5, 55.5, 233.4)
+ep80 0 (56.0, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+l2 0 (55.6, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+lr1e-3 1 (55.2, 30.0, 164.3) fixed: (71.5, 55.5, 233.4)
+ep20 0 (55.3, 31.2, 162.8) fixed: (71.5, 55.5, 233.4)
+ep20 1 (55.5, 30.8, 167.4) fixed: (71.5, 55.5, 233.4)
+drop0.4 0 (55.1, 31.2, 161.6) fixed: (71.5, 55.5, 233.4)
+h128 1 (55.6, 30.7, 164.3) fixed: (71.5, 55.5, 233.4)
+ep80 1 (55.5, 30.7, 164.3) fixed: (71.5, 55.5, 233.4)
+l4 0 (55.4, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
+h128 0 (55.8, 30.8, 164.3) fixed: (71.5, 55.5, 233.4)
 
 best_edp, app CV: extra cost vs. the best config of each region (%), mean over seeds [0, 1]
 variant     geomean   median      p90   geomean per seed
-base          74.85    39.70   236.50   75.50 74.20
-h32           69.85    37.25   225.00   70.00 69.70
-h128          80.55    40.65   260.45   80.00 81.10
-l2            71.10    38.75   218.00   71.20 71.00
-l4            77.05    40.10   237.90   76.30 77.80
-drop0.1       76.25    40.30   240.95   76.50 76.00
-drop0.4       68.05    37.25   212.35   68.20 67.90
-ep20          70.15    37.35   217.25   70.90 69.40
-ep80          77.65    39.30   255.45   77.40 77.90
-lr1e-3        70.25    37.95   219.55   68.50 72.00
+base          55.45    30.75   164.30   55.50 55.40
+h32           55.10    31.00   162.95   55.10 55.10
+h128          55.70    30.75   164.30   55.80 55.60
+l2            55.45    30.75   164.30   55.60 55.30
+l4            55.35    30.80   164.30   55.40 55.30
+drop0.1       55.70    30.75   164.30   55.80 55.60
+drop0.4       55.10    31.00   162.95   55.10 55.10
+ep20          55.40    31.00   165.10   55.30 55.50
+ep80          55.75    30.75   164.30   56.00 55.50
+lr1e-3        55.40    30.35   164.30   55.60 55.20
 fixed cfg     71.50    55.50   233.40   (best single config, reference)
 
-best variant for best_edp: drop0.4 (geomean loss 68.05%)  ->  training the final model in /home/yas0014/orbit/models_best
+best variant for best_edp: h32 (geomean loss 55.10%)  ->  training the final model in /home/yas0014/orbit/ORBIT/tools/models_best
 Loaded 161 regions from 22 applications: CoMD-openmp, bfs, bt.C.x2, cc, cg.C.x2, ep.D.x2, euler3d_cpu, euler3d_cpu_double, kmeans, lavaMD, lu.C.x2, lud_omp, lulesh2.0, mg.D.x2, pathfinder, pr, pre_euler3d_cpu, pre_euler3d_cpu_double, sc_omp, sp.C.x2, srad_v1, srad_v2
-Features: ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio + measured-under config (threads, sched, chunk, frequency)
+Features: ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio, time_s, power_w + measured-under config (threads, sched, chunk, frequency)
 Config space: threads=3, sched=2, chunk=5, frequency=18
 Output heads: threads=17 bins, sched=2 classes, chunk=11 bins, frequency=21 bins  (readout: argmax)
-Model: MLP (3 layers, hidden 64, 8 observations per sample)
+Model: MLP (3 layers, hidden 32, 8 observations per sample)
 
 --- best_edp: training final model on all 161 regions ---
-  final loss 5.7341  ->  saved /home/yas0014/orbit/models_best/model_best_edp.pt
-per-application table (mean of 2 seeds) -> /home/yas0014/orbit/models_best/cv_per_app_best_edp.csv
+  final loss 0.5544  ->  saved /home/yas0014/orbit/ORBIT/tools/models_best/model_best_edp.pt
+per-application table (mean of 2 seeds) -> /home/yas0014/orbit/ORBIT/tools/models_best/cv_per_app_best_edp.csv

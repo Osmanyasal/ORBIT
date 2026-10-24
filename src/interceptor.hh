@@ -47,6 +47,7 @@ namespace orbit
             Mode mode = Mode::Snapshot;
             RegionConfigs configs;
             std::int64_t frequency = 0;
+            int default_threads = 1;
             OptimizePolicy policy = OptimizePolicy::BestEdp; // ORBIT_OPTIMIZE_POLICY
         };
 
@@ -143,6 +144,7 @@ namespace orbit
         {
             Runtime runtime;
             runtime.frequency = utils::requested_cpu_frequency_khz();
+            runtime.default_threads = omp_get_max_threads();
             load_configuration(runtime);
             start_optkit(runtime);
             if (runtime.frequency > 0)

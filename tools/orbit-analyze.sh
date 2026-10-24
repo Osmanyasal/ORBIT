@@ -19,10 +19,14 @@
 #   --keep-run DIR         analyse an existing execution folder instead of running the program
 #   -h, --help
 # Settings of the snapshot run itself are taken from the environment (OMP_NUM_THREADS, OMP_SCHEDULE,
-# ORBIT_CPU_FREQ). ORBIT_LIB overrides the liborbit.so path, PYTHON the interpreter used for the predictor
+# ORBIT_CPU_FREQ), defaulting to OMP_NUM_THREADS=$(nproc) and OMP_SCHEDULE=static when unset or empty.
+# ORBIT_LIB overrides the liborbit.so path, PYTHON the interpreter used for the predictor
 # (it needs torch, pandas and numpy; a working one is searched for, otherwise tools/venv-orbit is created
 # with setup-venv.sh).
 set -euo pipefail
+
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$(nproc)}"
+export OMP_SCHEDULE="${OMP_SCHEDULE:-static}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORBIT_LIB="${ORBIT_LIB:-$HERE/../bin/Release/liborbit.so}"
