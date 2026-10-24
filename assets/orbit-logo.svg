@@ -13,7 +13,7 @@
     </linearGradient>
   </defs>
   <path fill="#FFFFFF" d="M0 0h1408v512H0z"/>
-  <g transform="translate(430 249) scale(.47)">
+  <g transform="translate(251.9 244.45) scale(.7755)">
     <g fill="none" stroke-linecap="round">
       <ellipse rx="106" ry="162" transform="rotate(-36)" stroke="#DCE8EC" stroke-width="2"/>
       <g transform="rotate(-26)" stroke="url(#thread)">
@@ -46,7 +46,7 @@
     <circle cx="-148" cy="-117" r="6" fill="#F29C59"/>
     <circle cx="104" cy="143" r="5" fill="#263E56"/>
   </g>
-  <g transform="translate(123 -318)">
+  <g transform="translate(-254.65 -691.1) scale(1.65)">
     <g fill="none" stroke="#14263D" stroke-width="12" stroke-linecap="square" stroke-linejoin="round" aria-hidden="true">
       <rect x="477" y="505" width="61" height="76" rx="27"/>
       <path d="M578 581V505H610C643 505 643 545 610 545H578M610 545L639 581"/>
