@@ -353,3 +353,4 @@ Notes:
 - The default model input contains only machine-independent metrics (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio). Absolute metrics such as `time_s` and `power_w` can be added with `--features`, but they depend on the hardware.
 - Each training application is normalised with the settings its own sweep covered, so applications swept on different machines can share one `--data-dir`.
 - Validation on unseen applications (leave-one-application-out, one observation per region) compares the predicted configuration with the best configuration of each region and with the untuned default (max threads, static, max frequency, chunk `--default-chunk`, 256 by default; the sweep has no unchunked `static`). The prediction is clearly closer to the optimum than the default; see the printed report and `models/cv_metrics.json`. More training applications are the most likely way to improve it.
+
