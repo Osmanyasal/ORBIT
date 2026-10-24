@@ -54,11 +54,16 @@ Two scripts in `tools/` automate the whole loop: analyse a program once, predict
 for every OpenMP region, and run the program with those settings applied. Run them on a node where
 `liborbit.so` can load (it needs the GPU libraries it was built against).
 
-Requirements: a built `bin/Release/liborbit.so` and trained models in `tools/models_best/`
-(`model_fastest.pt`, `model_best_edp.pt`; train them with `tools/run_predictor_sweep.sh`, see
-[Configuration Predictor](#configuration-predictor-mlp-)).
+Requirements: a built `bin/Release/liborbit.so`, a Python environment with `torch`, `pandas` and `numpy`
+(`tools/venv-orbit`) and trained models in `tools/models_best/` (`model_fastest.pt`, `model_best_edp.pt`;
+train them with `tools/run_predictor_sweep.sh`, see [Configuration Predictor](#configuration-predictor-mlp-)).
 
 ```bash
+# 0. One-time: create the virtual environment (CPU torch, numpy, pandas) with Python >= 3.9.
+#    orbit-analyze.sh runs this automatically when no working Python is found. The environment belongs to
+#    the node's Python, so repeat it on a node where the existing tools/venv-orbit does not work.
+tools/setup-venv.sh            # --force recreates it; PYTHON=/path/to/python3.x picks the interpreter
+
 # 1. Analyse: one Snapshot run + prediction -> orbit_<app>/best_per_region.json
 #    (holds the `fastest` and `best_edp` settings of every region)
 tools/orbit-analyze.sh -- ./your_application args...

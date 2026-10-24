@@ -20,7 +20,8 @@
 #   -h, --help
 # Settings of the snapshot run itself are taken from the environment (OMP_NUM_THREADS, OMP_SCHEDULE,
 # ORBIT_CPU_FREQ). ORBIT_LIB overrides the liborbit.so path, PYTHON the interpreter used for the predictor
-# (it needs torch, pandas and numpy; a working one is searched for otherwise).
+# (it needs torch, pandas and numpy; a working one is searched for, otherwise tools/venv-orbit is created
+# with setup-venv.sh).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,7 +91,11 @@ fi
 
 [[ -d "$MODEL_DIR" ]] || die "model directory not found: $MODEL_DIR (train with orbit-predictor.py train, or use -m)"
 MODEL_DIR="$(realpath -- "$MODEL_DIR")"
-find_python || die "no Python >= 3.7 with torch, pandas and numpy found; set PYTHON=/path/to/python"
+find_python || {
+    echo "[orbit-analyze] no Python >= 3.7 with torch, pandas and numpy found, creating $HERE/venv-orbit" >&2
+    "$HERE/setup-venv.sh" || die "could not create the virtual environment; run tools/setup-venv.sh manually"
+    find_python || die "the new virtual environment is unusable; set PYTHON=/path/to/python"
+}
 
 OUT="${OUT:-$PWD/orbit_${NAME:-analysis}}"
 mkdir -p -- "$OUT"
