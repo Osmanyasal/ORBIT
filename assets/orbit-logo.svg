@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="224" viewBox="0 0 720 224" role="img" aria-labelledby="orbit-title orbit-desc">
+  <title id="orbit-title">ORBIT — OpenMP Runtime Backend for Intelligent Tuning</title>
+  <desc id="orbit-desc">A teal orbital path surrounds a computing core with three parallel tuning bars, beside an original geometric ORBIT wordmark on a navy panel.</desc>
+  <rect width="720" height="224" rx="24" fill="#0f172a"/>
+  <g transform="translate(120 112)">
+    <ellipse rx="83" ry="41" transform="rotate(-30)" fill="none" stroke="#2dd4bf" stroke-width="4"/>
+    <rect x="-35" y="-35" width="70" height="70" rx="18" fill="#0f172a" stroke="#94a3b8" stroke-width="2"/>
+    <g fill="#2dd4bf">
+      <rect x="-20" y="0" width="9" height="19" rx="4.5"/>
+      <rect x="-4.5" y="-11" width="9" height="30" rx="4.5"/>
+      <rect x="11" y="-22" width="9" height="41" rx="4.5"/>
+    </g>
+    <path d="M-72 41 C-51 51-16 44 21 23" fill="none" stroke="#2dd4bf" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="72" cy="-41.5" r="9" fill="#2dd4bf" stroke="#0f172a" stroke-width="4"/>
+  </g>
+  <g fill="none" stroke="#f1f5f9" stroke-width="10" stroke-linecap="square" stroke-linejoin="round">
+    <rect x="244" y="74" width="60" height="76" rx="23"/>
+    <path d="M334 150 V74 H365 Q390 74 390 94 Q390 113 365 113 H334 M365 113 L393 150"/>
+    <path d="M422 112 H452 Q477 112 477 93 Q477 74 452 74 H422 V150 H454 Q480 150 480 131 Q480 112 452 112"/>
+    <path d="M510 74 H550 M530 74 V150 M510 150 H550"/>
+    <path d="M578 74 H644 M611 74 V150"/>
+  </g>
+</svg>
