@@ -1,8 +1,6 @@
 # ORBIT
 
-<img alt="ORBIT logo: interwoven orbital threads around a parallel-computing core beside the ORBIT wordmark on a white background" src="assets/orbit-logo.svg" />
-
-OpenMP Runtime Backend for Intelligent Tuning
+<img width="100%" alt="ORBIT logo: interwoven orbital threads around a parallel-computing core beside the ORBIT wordmark on a white background" src="assets/orbit-logo.svg" />
 
 ## Download and Install 🚀
 
