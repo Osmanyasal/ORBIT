@@ -1,0 +1,45 @@
+ep20 1 (26.8, 13.4, 78.2) fixed: (31.8, 17.6, 77.6)
+ep20 0 (25.7, 13.2, 71.2) fixed: (31.8, 17.6, 77.6)
+h32 1 (25.1, 13.2, 74.2) fixed: (31.8, 17.6, 77.6)
+h32 0 (25.3, 13.2, 72.4) fixed: (31.8, 17.6, 77.6)
+l2 1 (25.8, 13.2, 74.1) fixed: (31.8, 17.6, 77.6)
+l2 0 (26.5, 13.4, 76.5) fixed: (31.8, 17.6, 77.6)
+drop0.1 0 (27.1, 13.5, 76.2) fixed: (31.8, 17.6, 77.6)
+drop0.1 1 (28.5, 13.8, 78.2) fixed: (31.8, 17.6, 77.6)
+lr1e-3 1 (26.8, 13.2, 77.1) fixed: (31.8, 17.6, 77.6)
+base 1 (26.9, 13.5, 73.9) fixed: (31.8, 17.6, 77.6)
+base 0 (26.8, 13.4, 78.1) fixed: (31.8, 17.6, 77.6)
+lr1e-3 0 (26.0, 13.2, 75.4) fixed: (31.8, 17.6, 77.6)
+drop0.4 1 (25.5, 12.6, 77.4) fixed: (31.8, 17.6, 77.6)
+drop0.4 0 (25.1, 12.5, 69.0) fixed: (31.8, 17.6, 77.6)
+l4 0 (27.7, 13.5, 80.7) fixed: (31.8, 17.6, 77.6)
+l4 1 (28.0, 13.4, 78.2) fixed: (31.8, 17.6, 77.6)
+h128 0 (28.5, 13.8, 81.3) fixed: (31.8, 17.6, 77.6)
+h128 1 (28.1, 13.5, 80.9) fixed: (31.8, 17.6, 77.6)
+ep80 1 (28.0, 13.5, 77.1) fixed: (31.8, 17.6, 77.6)
+ep80 0 (28.3, 13.4, 79.1) fixed: (31.8, 17.6, 77.6)
+
+fastest, app CV: extra cost vs. the best config of each region (%), mean over seeds [0, 1]
+variant     geomean   median      p90   geomean per seed
+base          26.85    13.45    76.00   26.80 26.90
+h32           25.20    13.20    73.30   25.30 25.10
+h128          28.30    13.65    81.10   28.50 28.10
+l2            26.15    13.30    75.30   26.50 25.80
+l4            27.85    13.45    79.45   27.70 28.00
+drop0.1       27.80    13.65    77.20   27.10 28.50
+drop0.4       25.30    12.55    73.20   25.10 25.50
+ep20          26.25    13.30    74.70   25.70 26.80
+ep80          28.15    13.45    78.10   28.30 28.00
+lr1e-3        26.40    13.20    76.25   26.00 26.80
+fixed cfg     31.80    17.60    77.60   (best single config, reference)
+
+best variant for fastest: h32 (geomean loss 25.20%)  ->  training the final model in /home/yas0014/orbit/models_best
+Loaded 161 regions from 22 applications: CoMD-openmp, bfs, bt.C.x2, cc, cg.C.x2, ep.D.x2, euler3d_cpu, euler3d_cpu_double, kmeans, lavaMD, lu.C.x2, lud_omp, lulesh2.0, mg.D.x2, pathfinder, pr, pre_euler3d_cpu, pre_euler3d_cpu_double, sc_omp, sp.C.x2, srad_v1, srad_v2
+Features: ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio + measured-under config (threads, sched, chunk, frequency)
+Config space: threads=3, sched=2, chunk=5, frequency=18
+Output heads: threads=17 bins, sched=2 classes, chunk=11 bins, frequency=21 bins  (readout: argmax)
+Model: MLP (3 layers, hidden 32, 8 observations per sample)
+
+--- fastest: training final model on all 161 regions ---
+  final loss 5.7958  ->  saved /home/yas0014/orbit/models_best/model_fastest.pt
+per-application table (mean of 2 seeds) -> /home/yas0014/orbit/models_best/cv_per_app_fastest.csv

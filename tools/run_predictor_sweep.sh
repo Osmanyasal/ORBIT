@@ -3,7 +3,7 @@
 # Usage: ./run_predictor_sweep.sh [WORKERS]   (default: all cores of the node)
 # Runs 10 variants (the default setting is "base") x 2 seeds x 2 targets (22 folds each), one single-threaded
 # training per worker. At the end of each target the variant with the lowest mean geomean loss is selected
-# and the final model is trained on all regions: ../../models_best/model_fastest.pt and model_best_edp.pt
+# and the final model is trained on all regions: models_best/model_fastest.pt and model_best_edp.pt (next to this script)
 # (+ best_<target>.json with the chosen variant). Training data: ../../P12-data (override: ORBIT_DATA_DIR).
 # Results: predictor_sweep_logs/<target>_app_<variant>_s<seed>.log and predictor_sweep_logs/results_*_app.txt
 # The virtualenv ORBIT/tools/venv-orbit is created (and activated) if it is missing or unusable on this node.

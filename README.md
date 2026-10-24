@@ -48,6 +48,53 @@ directory is on the compiler's include path. On RPM-based systems, the system
 development package is commonly named `libffi-devel`; on Debian/Ubuntu it is
 `libffi-dev`. Installing system packages requires administrator access.
 
+## Quick Start: Tune an Application 🎯
+
+Two scripts in `tools/` automate the whole loop: analyse a program once, predict the best settings
+for every OpenMP region, and run the program with those settings applied. Run them on a node where
+`liborbit.so` can load (it needs the GPU libraries it was built against).
+
+Requirements: a built `bin/Release/liborbit.so` and trained models in `tools/models_best/`
+(`model_fastest.pt`, `model_best_edp.pt`; train them with `tools/run_predictor_sweep.sh`, see
+[Configuration Predictor](#configuration-predictor-mlp-)).
+
+```bash
+# 1. Analyse: one Snapshot run + prediction -> orbit_<app>/best_per_region.json
+#    (holds the `fastest` and `best_edp` settings of every region)
+tools/orbit-analyze.sh -- ./your_application args...
+
+# 2. Optimize: run with the settings applied
+tools/orbit-optimize.sh -p edp -- ./your_application args...          # best EDP (default)
+tools/orbit-optimize.sh -p fastest -- ./your_application args...      # fastest
+tools/orbit-optimize.sh -p both --baseline -- ./your_application args...  # both, plus an untuned run
+```
+
+`orbit-analyze.sh` runs the program once in Snapshot mode (`ORBIT_OPTIMIZED_CONF` unset; the run uses
+`OMP_NUM_THREADS`, `OMP_SCHEDULE` and `ORBIT_CPU_FREQ` from the environment), then calls
+`orbit-predictor.py generate` on the resulting execution folder.
+
+| Option | Description |
+|--------|-------------|
+| `-o, --out DIR` | Output directory (default: `./orbit_<application name>`) |
+| `-m, --model-dir DIR` | Trained models (default: `tools/models_best`, or `$ORBIT_MODEL_DIR`) |
+| `--max-threads N`, `--freq-range MIN_KHZ MAX_KHZ`, `--freq-step KHZ` | Describe the target machine when cpufreq is not readable (defaults: `nproc`, cpufreq range, 200 MHz) |
+| `--skip-first N`, `--stat mean\|median`, `--time-source energy\|pmu` | How the calls of a region are compressed |
+| `--keep-run DIR` | Analyse an existing execution folder instead of running the program |
+
+`orbit-optimize.sh` runs the program in Optimize mode and prints the wall-clock time of every run.
+
+| Option | Description |
+|--------|-------------|
+| `-c, --conf FILE` | Settings file (default: `./orbit_<application name>/best_per_region.json`) |
+| `-p, --policy` | `edp` (default), `fastest` or `both` (one run each) |
+| `-t, --threshold T` | `ORBIT_TIME_THRESHOLD`, e.g. `10ms`; `0` tunes every region |
+| `--baseline` | Also run the program once without ORBIT |
+
+It stops with an error if the settings file is missing, because ORBIT would otherwise silently fall back to
+Snapshot mode. Both scripts accept `ORBIT_LIB` to use another `liborbit.so`, and `--help` lists every option.
+The wall-clock time includes input loading and is only a rough check; compare energy × time from Snapshot
+runs for a real EDP comparison.
+
 ## Per-Region OpenMP Interception
 
 Preload `liborbit.so` into an application using the selected OpenMP runtime.
@@ -254,6 +301,10 @@ Requires `matplotlib` and `numpy`.
 python3 tools/best_settings.py runs/bt.C.x
 python3 tools/plot_heatmaps.py best_settings_bt.C.x
 ```
+
+### Automated workflow (`tools/orbit-analyze.sh`, `tools/orbit-optimize.sh`)
+
+See [Quick Start](#quick-start-tune-an-application-) at the top of this file.
 
 ## Configuration Predictor (MLP) 🧠
 

@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(TOOLS))  # folder holding ORBIT/ and the data
-MODELS_OUT = os.path.join(ROOT, "models_best")
+MODELS_OUT = os.path.join(TOOLS, "models_best")
 LOG_DIR = os.path.join(TOOLS, "predictor_sweep_logs")
 PY = sys.executable
 DATA = os.environ.get("ORBIT_DATA_DIR", os.path.join(ROOT, "P12-data"))
