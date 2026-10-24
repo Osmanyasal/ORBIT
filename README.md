@@ -84,7 +84,20 @@ tools/orbit-optimize.sh -p both --baseline -- ./your_application args...  # both
 | `--skip-first N`, `--stat mean\|median`, `--time-source energy\|pmu` | How the calls of a region are compressed |
 | `--keep-run DIR` | Analyse an existing execution folder instead of running the program |
 
-`orbit-optimize.sh` runs the program in Optimize mode and prints the wall-clock time of every run.
+`orbit-optimize.sh` measures every optimized and optional baseline run with
+`optkit-cli stat --cpu-energy -- <program>`. Application output and OPTKIT's CPU energy
+report are printed for each run, followed by a wall-clock summary. ORBIT is preloaded
+only into the optimized application, not the profiler.
+
+Build the CLI against the built OPTKIT library before optimizing:
+
+```bash
+make -C lib/OPTKIT/tools/optkit-cli
+```
+
+The default executable is `lib/OPTKIT/tools/optkit-cli/optkit-cli`; set `OPTKIT_CLI`
+to another executable path or a command in `PATH` if needed. Energy measurement
+requires access to the CPU energy counters or the energy backend configured in OPTKIT.
 
 | Option | Description |
 |--------|-------------|
@@ -95,8 +108,10 @@ tools/orbit-optimize.sh -p both --baseline -- ./your_application args...  # both
 
 It stops with an error if the settings file is missing, because ORBIT would otherwise silently fall back to
 Snapshot mode. Both scripts accept `ORBIT_LIB` to use another `liborbit.so`, and `--help` lists every option.
-The wall-clock time includes input loading and is only a rough check; compare energy × time from Snapshot
-runs for a real EDP comparison.
+The wall-clock summary includes input loading and profiler overhead, so it is only a rough timing
+check. Use OPTKIT's measured CPU energy and duration for whole-application energy/EDP comparisons;
+Snapshot measurements remain useful for per-region comparisons. Application and profiler failures
+stop the script rather than producing a successful timing summary.
 
 ## Per-Region OpenMP Interception
 

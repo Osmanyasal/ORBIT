@@ -5,14 +5,16 @@
 #   -c, --conf FILE        best_per_region.json to apply (default: ./orbit_<executable name>/best_per_region.json)
 #   -p, --policy POLICY    edp (default), fastest, or both (one run each)
 #   -t, --threshold T      ORBIT_TIME_THRESHOLD: minimum region time to be tuned, e.g. 50ms, 0 = every region
-#   --baseline             also run the program once without ORBIT, to compare wall-clock times
+#   --baseline             also measure the program once without ORBIT
 #   -h, --help
-# ORBIT_LIB overrides the liborbit.so path. The program's own output is passed through unchanged; the
-# wall-clock time of every run is printed at the end.
+# ORBIT_LIB overrides the liborbit.so path. OPTKIT_CLI overrides the bundled optkit-cli executable.
+# Every run uses optkit-cli stat --cpu-energy; application output and energy reports are passed through.
+# The wall-clock summary includes application input loading and profiler overhead.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ORBIT_LIB="${ORBIT_LIB:-$HERE/../bin/Release/liborbit.so}"
+OPTKIT_CLI="${OPTKIT_CLI:-$HERE/../lib/OPTKIT/tools/optkit-cli/optkit-cli}"
 CONF=""
 POLICY="edp"
 THRESHOLD=""
@@ -54,13 +56,36 @@ CONF="${CONF:-$PWD/orbit_$(basename -- "$TARGET")/best_per_region.json}"
 [[ -f "$CONF" ]] || die "settings file not found: $CONF (run orbit-analyze.sh first or pass -c)"
 CONF="$(realpath -- "$CONF")"
 
+OPTKIT_CLI="$(command -v -- "$OPTKIT_CLI")" || die "optkit-cli not found (build it with make -C $HERE/../lib/OPTKIT/tools/optkit-cli or set OPTKIT_CLI)"
+[[ -f "$OPTKIT_CLI" && -x "$OPTKIT_CLI" ]] || die "optkit-cli is not executable: $OPTKIT_CLI"
+OPTKIT_CLI="$(realpath -- "$OPTKIT_CLI")"
+
+RUN_DIR="$(mktemp -d)"
+RUN_STATUS="$RUN_DIR/status"
+trap 'rm -f -- "$RUN_STATUS"; rmdir -- "$RUN_DIR"' EXIT
+
 declare -a LABELS=() TIMES=()
 run() { # label, then the environment assignments and command to run
-    local label="$1" start end
+    local label="$1" start end status
     shift
     echo "[orbit-optimize] $label"
     start="$(date +%s.%N)"
-    "$@"
+    rm -f -- "$RUN_STATUS"
+    # OPTKIT currently ignores its child's exit status; record it independently.
+    "$OPTKIT_CLI" stat --cpu-energy -o -- bash -c '
+        status_file="$1"
+        shift
+        "$@"
+        status=$?
+        printf "%s\n" "$status" > "$status_file"
+        exit "$status"
+    ' orbit-optimize "$RUN_STATUS" "$@"
+    [[ -s "$RUN_STATUS" ]] || die "profiler did not record an application exit status for $label"
+    read -r status < "$RUN_STATUS"
+    if [[ "$status" -ne 0 ]]; then
+        echo "orbit-optimize: $label failed with exit status $status" >&2
+        exit "$status"
+    fi
     end="$(date +%s.%N)"
     LABELS+=("$label")
     TIMES+=("$(awk -v s="$start" -v e="$end" 'BEGIN { printf "%.3f", e - s }')")
@@ -80,7 +105,7 @@ for p in "${policies[@]}"; do
 done
 
 echo
-echo "[orbit-optimize] wall-clock time (includes input loading):"
+echo "[orbit-optimize] wall-clock time (includes input loading and profiler overhead):"
 for i in "${!LABELS[@]}"; do
     printf '  %-28s %s s\n' "${LABELS[$i]}" "${TIMES[$i]}"
 done

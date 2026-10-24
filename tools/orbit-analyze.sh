@@ -121,6 +121,8 @@ if [[ ! -f "$RUN_DIR/snapshot.conf" ]] && ! compgen -G "$RUN_DIR/*/snapshot.conf
     die "no snapshot.conf found under $RUN_DIR; did ORBIT intercept an OpenMP region? (is liborbit.so built for this OpenMP runtime?)"
 fi
 
+echo "[orbit-analyze] completed snapshot run"
+
 # --- 2. predict fastest / best_edp settings ------------------------------------------------------
 CONF="$OUT/best_per_region.json"
 echo "[orbit-analyze] generating settings with $PY, models: $MODEL_DIR"
