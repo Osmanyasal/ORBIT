@@ -1,6 +1,6 @@
 # ORBIT
 
-<img width="1408" height="512" alt="ORBIT logo: interwoven orbital threads around a parallel-computing core beside the ORBIT wordmark on a white background" src="assets/orbit-logo.svg" />
+<img alt="ORBIT logo: interwoven orbital threads around a parallel-computing core beside the ORBIT wordmark on a white background" src="assets/orbit-logo.svg" />
 
 OpenMP Runtime Backend for Intelligent Tuning
 
