@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Train models that predict the best OpenMP configuration of a code region.
 
-Two model types share the whole pipeline (data, cross-validation, ``predict``, ``generate``);
-choose with ``train --model``: ``gru`` (default, recurrent over the observations) or ``mlp``
-(feed-forward DNN: the same dense layers encode every observation, the encodings are averaged).
-Observation order carries no information, so both reach similar accuracy; see the README.
+The model is a feed-forward MLP: the same dense layers encode every observation and the encodings
+are averaged, so the order of the observations is irrelevant and no time series is needed.
 
 Data layout (``--data-dir``): every folder below it that contains both
 ``all_configs.csv`` and ``best_per_region.json`` is treated as one application.
@@ -14,7 +12,7 @@ Problem formulation
 * One training sample = one region.
 * Input  = a set of profiling observations of that region. Each one holds
   the performance metrics (default: ipc, l2_hit_ratio, l3_mpki,
-  branch_mispr_ratio, plus time_s and power_w - restrict with --features) and
+  branch_mispr_ratio - change with --features) and
   the configuration they were measured under (threads, sched, chunk,
   frequency), since the metrics depend on it.
 * Output = four heads: threads, sched, chunk, frequency. ``sched`` is a plain classification.
@@ -39,17 +37,19 @@ Problem formulation
 Evaluation
 ----------
 Leave-one-application-out cross-validation (rows of one region share a label,
-so a random row split would leak). Besides exact accuracy it reports how much
-slower (fastest) / higher EDP (best_edp) the predicted config is relative to
-the true optimum, looked up in all_configs.csv, next to two simple baselines.
+so a random row split would leak). It reports how much slower (fastest) / higher
+EDP (best_edp) the config predicted from one observation is relative to the best
+config of the region, looked up in all_configs.csv, next to the untuned default
+(max threads, static, max frequency; --default-chunk) and the global fixed config (the single
+config with the lowest geometric-mean extra cost over the training applications' regions).
 
 Usage
 -----
-    python train_gru.py train    --data-dir ../../P10-data --out-dir models [--model gru|mlp]
-    python train_gru.py generate --model-dir models --snapshots <snapshot run or folder of runs> \\
+    python train_model.py train    --data-dir ../../P10-data --out-dir models
+    python train_model.py generate --model-dir models --snapshots <snapshot run or folder of runs> \\
                                  --output predicted_best_per_region.json \\
                                  [--max-threads N] [--freq-range MIN_KHZ MAX_KHZ] [--freq-step KHZ]
-    python train_gru.py predict  --model-dir models --input some_all_configs.csv
+    python train_model.py predict  --model-dir models --input some_all_configs.csv
 
 ``generate`` is the application-execution step: run the application once in ORBIT snapshot
 mode (or a few times with different settings), point ``--snapshots`` at the resulting
@@ -86,10 +86,12 @@ CPUFREQ_DIR = Path("/sys/devices/system/cpu/cpu0/cpufreq")
 SWEEP_MIN_KHZ = 1_000_000  # scan.sh never sweeps below 1 GHz
 TARGETS = ("fastest", "best_edp")
 TARGET_METRIC = {"fastest": "time_s", "best_edp": "edp"}
-DEFAULT_FEATURES = ("ipc", "l2_hit_ratio", "l3_mpki", "branch_mispr_ratio", "time_s", "power_w")
+DEFAULT_FEATURES = ("ipc", "l2_hit_ratio", "l3_mpki", "branch_mispr_ratio")
 CLIP = 5.0
 REQUIRED_COLUMNS = ("region", *HEADS, "time_s", "edp")
-BASELINES = ("baseline: majority label", "baseline: best global config")
+BASELINE = "default config (max threads, static, max frequency)"
+GLOBAL = "global fixed config (best single config of the training apps)"
+MODEL_ROW = "MLP (1 observation)"
 
 
 # --------------------------------------------------------------------------- #
@@ -398,22 +400,6 @@ def sample_batch(xpad, nrows, reg, max_len, lens, gen):
 # --------------------------------------------------------------------------- #
 # Model
 # --------------------------------------------------------------------------- #
-class ConfigGRU(nn.Module):
-    def __init__(self, in_dim: int, hidden: int, layers: int, dropout: float, head_sizes: dict):
-        super().__init__()
-        self.in_dim = in_dim
-        self.embed = nn.Sequential(nn.Linear(in_dim, hidden), nn.GELU())
-        self.gru = nn.GRU(hidden, hidden, layers, batch_first=True,
-                          dropout=dropout if layers > 1 else 0.0)
-        self.drop = nn.Dropout(dropout)
-        self.heads = nn.ModuleDict({h: nn.Linear(hidden, n) for h, n in head_sizes.items()})
-
-    def forward(self, x, lens):
-        out, _ = self.gru(self.embed(x))
-        h = self.drop(out[torch.arange(x.size(0)), lens - 1])
-        return {k: head(h) for k, head in self.heads.items()}
-
-
 class ConfigMLP(nn.Module):
     """Feed-forward DNN. The same dense stack encodes every observation, the encodings are averaged
     over the observations of the sample (so their order is irrelevant) and linear heads predict the
@@ -435,8 +421,6 @@ class ConfigMLP(nn.Module):
         return {k: head(h) for k, head in self.heads.items()}
 
 
-MODELS = {"gru": ConfigGRU, "mlp": ConfigMLP}
-DEFAULT_LAYERS = {"gru": 1, "mlp": 3}
 
 
 def soft_label_matrix(n: int, sigma: float) -> torch.Tensor:
@@ -487,7 +471,7 @@ def train_model(train: list[Region], target: str, vocab: dict, axes: dict, args,
     train = [r for r in train if target in r.labels]
     pre = Preproc.fit(np.concatenate([r.feats for r in train]))
     xpad, nrows = build_tensors(train, pre, not args.no_config_context)
-    model = MODELS[args.model](xpad.shape[2], args.hidden, args.layers, args.dropout, head_sizes(vocab, axes))
+    model = ConfigMLP(xpad.shape[2], args.hidden, args.layers, args.dropout, head_sizes(vocab, axes))
     steps_per_epoch = math.ceil(len(train) * args.samples_per_region / args.batch_size)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * steps_per_epoch)
@@ -541,16 +525,21 @@ def ratio_to_oracle(region: Region, target: str, cfg) -> float:
     return float(grid[tuple(cfg)] / np.nanmin(grid))
 
 
-def global_best_config(train: list[Region], target: str) -> np.ndarray:
-    """Single config with the lowest geometric-mean ratio-to-oracle over training regions."""
-    logr = np.stack([np.log(r.perf[target] / np.nanmin(r.perf[target])) for r in train])
-    mean = np.where(np.isnan(logr).any(0), np.inf, logr.mean(0))
-    return np.array(np.unravel_index(np.argmin(mean), mean.shape))
+def default_config(region: Region, vocab: dict, chunk: int) -> np.ndarray:
+    """Class indices of the untuned configuration: all threads and the highest frequency of the region's
+    machine, static schedule, and the swept chunk size closest to `chunk` (the sweep has no unchunked static)."""
+    sched = vocab["sched"].index("static") if "static" in vocab["sched"] else 0
+    chunk_idx = int(np.abs(np.asarray(vocab["chunk"]) - chunk).argmin())
+    return np.array([vocab["threads"].index(max(region.machine.threads)), sched, chunk_idx,
+                     vocab["frequency"].index(max(region.machine.frequency))])
 
 
-def majority_config(train: list[Region], target: str) -> np.ndarray:
-    labs = np.stack([r.labels[target] for r in train])
-    return np.array([np.bincount(labs[:, j]).argmax() for j in range(len(HEADS))])
+def global_fixed_config(train: list[Region], target: str) -> np.ndarray:
+    """Class indices of the single configuration with the lowest geometric-mean cost/oracle ratio over
+    the training regions (configurations missing from a region's sweep are ignored for that region)."""
+    log_ratio = np.stack([np.log(r.perf[target] / np.nanmin(r.perf[target])) for r in train])
+    mean = np.nanmean(log_ratio, axis=0)
+    return np.array(np.unravel_index(np.nanargmin(mean), mean.shape))
 
 
 def score_rows(method, regions, target, preds) -> list[dict]:
@@ -606,41 +595,33 @@ def cross_validate(regions, target, vocab, axes, args) -> pd.DataFrame:
         xpad, nrows = build_tensors(test, pre, not args.no_config_context)
         machines = [r.machine for r in test]
 
-        def decode(probs, readout=args.readout):
-            return decode_configs(probs, machines, vocab, readout)
-
-        for length in sorted({1, args.max_len}):
-            probs = predict_proba(model, xpad, nrows, length, args.eval_draws, args.seed + 1)
-            rows += score_rows(f"{args.model.upper()} L={length}", test, target, decode(probs))
-            if length == args.max_len:
-                mean_probs = {h: p.mean(1, keepdim=True) for h, p in probs.items()}
-                rows += score_rows(avg_method_name(args), test, target, decode(mean_probs))
-                if args.readout != "median":
-                    rows += score_rows(avg_method_name(args, "median"), test, target,
-                                       decode(mean_probs, "median"))
-        for label, cfg in zip(BASELINES, (majority_config(train, target), global_best_config(train, target))):
-            rows += score_rows(label, test, target, np.tile(cfg, (len(test), 1, 1)))
+        probs = predict_proba(model, xpad, nrows, 1, args.eval_draws, args.seed + 1)
+        rows += score_rows(MODEL_ROW, test, target, decode_configs(probs, machines, vocab, args.readout))
+        default = np.stack([default_config(r, vocab, args.default_chunk) for r in test])[:, None, :]
+        rows += score_rows(BASELINE, test, target, default)
+        fixed = np.tile(global_fixed_config(train, target), (len(test), 1, 1))
+        rows += score_rows(GLOBAL, test, target, fixed)
         rows += score_rows("oracle", test, target, np.stack([r.labels[target] for r in test])[:, None, :])
         print(f"  fold {name:<6} train={len(train):3d} test={len(test):3d} regions  ({time.time() - t0:.1f}s)")
     return pd.DataFrame(rows)
 
 
-def avg_method_name(args, readout: str | None = None) -> str:
-    return f"{args.model.upper()} L={args.max_len}, avg of {args.eval_draws} subsets, {readout or args.readout} readout"
-
-
 def report_cv(df: pd.DataFrame, target: str, n_regions: int, args):
     unit = "time" if target == "fastest" else "EDP"
     print(f"\n=== {target}: cross-validation ({args.cv_mode}), {n_regions} regions ===")
-    print(f"<head>%/exact% = exact-match accuracy; *_loss% = extra {unit} of the predicted config "
-          f"vs. the true optimum (lower is better)")
-    print(summarize(df).round(1).to_string())
-    methods = [avg_method_name(args), BASELINES[1]]
+    print(f"Extra {unit} of the chosen config vs. the best config of each region, in % "
+          f"(0 = as good as the best, lower is better)")
+    print(summarize(df)[["geomean_loss%", "median_loss%", "p90_loss%"]].round(1).to_string())
+    methods = [MODEL_ROW, BASELINE, GLOBAL]
     sub = df[df["method"].isin(methods)]
     per_app = sub.groupby(["app", "method"])["ratio"].apply(
         lambda s: 100 * (np.exp(np.nanmean(np.log(s))) - 1)).unstack()[methods]
-    print(f"\ngeomean {unit} loss% per held-out group:")
+    print(f"\nGeometric-mean extra {unit} % per held-out application:")
     print(per_app.round(1).to_string())
+    table = per_app.rename(columns={MODEL_ROW: "predictor", BASELINE: "default", GLOBAL: "global_fixed"})
+    table.insert(0, "n_regions", df[df["method"] == MODEL_ROW].groupby("app")["region"].nunique())
+    table.index.name = "application"
+    return table
 
 
 # --------------------------------------------------------------------------- #
@@ -649,7 +630,7 @@ def report_cv(df: pd.DataFrame, target: str, n_regions: int, args):
 def save_checkpoint(path: Path, model, pre, vocab, axes, target, args, n_regions, features):
     torch.save({
         "state_dict": model.state_dict(),
-        "model": args.model,
+        "model": "mlp",
         "arch": {"in_dim": model.in_dim, "hidden": args.hidden, "layers": args.layers,
                  "dropout": args.dropout},
         "vocab": vocab,
@@ -669,9 +650,11 @@ def load_checkpoint(path: Path):
     if "axes" not in ck:
         sys.exit(f"{path} was trained with per-value classes for threads/chunk/frequency and cannot "
                  f"transfer to other settings or machines; retrain with 'train'")
+    if ck.get("model", "gru") != "mlp":
+        sys.exit(f"{path} is not an MLP checkpoint (GRU models are no longer supported); retrain with 'train'")
     a = ck["arch"]
-    model = MODELS[ck.get("model", "gru")](a["in_dim"], a["hidden"], a["layers"], a["dropout"],
-                                           head_sizes(ck["vocab"], ck["axes"]))
+    model = ConfigMLP(a["in_dim"], a["hidden"], a["layers"], a["dropout"],
+                      head_sizes(ck["vocab"], ck["axes"]))
     model.load_state_dict(ck["state_dict"])
     model.eval()
     return model, ck
@@ -681,8 +664,6 @@ def load_checkpoint(path: Path):
 # Commands
 # --------------------------------------------------------------------------- #
 def cmd_train(args):
-    if args.layers is None:
-        args.layers = DEFAULT_LAYERS[args.model]
     features = tuple(f.strip() for f in args.features.split(",") if f.strip())
     out_dir = Path(args.out_dir)
     regions, vocab = load_regions(Path(args.data_dir), features)
@@ -698,7 +679,7 @@ def cmd_train(args):
     print("Output heads: " + ", ".join(f"{h}={n} {'classes' if h == 'sched' else 'bins'}"
                                        for h, n in head_sizes(vocab, axes).items())
           + f"  (readout: {args.readout})")
-    print(f"Model: {args.model} ({args.layers} layer{'s' if args.layers != 1 else ''}, hidden {args.hidden}, "
+    print(f"Model: MLP ({args.layers} layer{'s' if args.layers != 1 else ''}, hidden {args.hidden}, "
           f"{args.max_len} observation{'s' if args.max_len != 1 else ''} per sample)")
 
     summary = {}
@@ -707,7 +688,10 @@ def cmd_train(args):
         if args.cv_mode != "none":
             print(f"\n--- {target}: cross-validation ---")
             cv = cross_validate(regions, target, vocab, axes, args)
-            report_cv(cv, target, n, args)
+            report = report_cv(cv, target, n, args)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            report.round(3).to_csv(out_dir / f"cv_per_app_{target}.csv")
+            print(f"  per-application table written to {out_dir / f'cv_per_app_{target}.csv'}")
             summary[target] = json.loads(summarize(cv).round(3).to_json(orient="index"))
         if args.cv_only:
             continue
@@ -798,12 +782,17 @@ def import_best_settings():
     """best_settings.py (ORBIT/tools) turns executions into all_configs.csv rows; reuse it so the
     snapshot features are computed exactly like the training data."""
     here = Path(__file__).resolve().parent
+    import importlib.util
     for d in (here, here.parent):
-        if (d / "best_settings.py").is_file():
-            sys.path.insert(0, str(d))
-            import best_settings
-            return best_settings
-    sys.exit(f"best_settings.py not found next to or above {here}")
+        for name in ("best_settings.py", "orbit-best-settings.py"):
+            f = d / name
+            if f.is_file():
+                spec = importlib.util.spec_from_file_location("best_settings", f)
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules["best_settings"] = mod  # needed for multiprocessing/pickling
+                spec.loader.exec_module(mod)
+                return mod
+    sys.exit(f"best_settings.py / orbit-best-settings.py not found next to or above {here}")
 
 
 def find_runs(paths) -> list[Path]:
@@ -848,7 +837,8 @@ def load_snapshots(paths, stat: str, skip_first: int, time_source: str) -> pd.Da
 
 
 def build_config(obs: pd.DataFrame, preds: list[dict], meta: dict) -> dict:
-    """best_per_region.json-style document: region -> {caller, function, calls, fastest, best_edp}."""
+    """best_per_region.json-style document: region -> {caller, function, calls, total_time_s, fastest,
+    best_edp}. total_time_s sits at the region level because it is shared by both targets."""
     by_region = {}
     for p in preds:
         by_region.setdefault(p["region"], {})[p["target"]] = {h: p[h] for h in HEADS}
@@ -860,10 +850,11 @@ def build_config(obs: pd.DataFrame, preds: list[dict], meta: dict) -> dict:
         # ORBIT skips regions whose total_time_s is below its threshold; the best time seen in the
         # snapshot executions stands in for it (the time under the predicted settings is unknown).
         total_time_s = calls * float(g["time_s"].min())
-        entry = {"caller": g["caller"].iloc[0], "function": g["function"].iloc[0], "calls": calls}
+        entry = {"caller": g["caller"].iloc[0], "function": g["function"].iloc[0], "calls": calls,
+                 "total_time_s": total_time_s}
         for target in TARGETS:
             if target in by_region[region]:
-                entry[target] = {**by_region[region][target], "total_time_s": total_time_s}
+                entry[target] = by_region[region][target]
         config[region] = entry
     config["_prediction"] = meta
     return config
@@ -878,7 +869,7 @@ def cmd_generate(args):
         print(f"[warn] no complete PMU metrics for {len(skipped)} region(s), left out: "
               f"{', '.join(skipped[:8])}{' ...' if len(skipped) > 8 else ''}")
     meta = {
-        "generated_by": "train_gru.py generate",
+        "generated_by": "train_model.py generate",
         "snapshots": [str(Path(p).resolve()) for p in args.snapshots],
         "targets": sorted({p["target"] for p in preds}),
         "note": "threads/sched/chunk/frequency are model predictions; total_time_s is calls x the best "
@@ -897,12 +888,11 @@ def cmd_generate(args):
 
     print(f"\n{'region':<18}{'calls':>6}{'total_s':>9}   {'fastest':<30}{'best_edp'}")
     for name, e in regions.items():
-        total_s = (e.get("fastest") or e["best_edp"])["total_time_s"]
-        print(f"{name:<18}{e['calls']:>6}{total_s:>9.3f}   {fmt(e.get('fastest')):<30}{fmt(e.get('best_edp'))}")
+        print(f"{name:<18}{e['calls']:>6}{e['total_time_s']:>9.3f}   {fmt(e.get('fastest')):<30}{fmt(e.get('best_edp'))}")
     print(f"\nWrote {len(regions)} regions to {args.output}\n"
           f"Apply with: ORBIT_OPTIMIZED_CONF={args.output} ORBIT_OPTIMIZE_POLICY=<fastest|edp> "
           f"LD_PRELOAD=<liborbit.so> ./app\n"
-          f"(ORBIT only tunes regions with total_time_s above ORBIT_TIME_THRESHOLD, default 100ms)")
+          f"(ORBIT only tunes regions with total_time_s above ORBIT_TIME_THRESHOLD, default 50ms)")
 
 
 def add_machine_args(p: argparse.ArgumentParser):
@@ -920,12 +910,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    t = sub.add_parser("train", help="cross-validate and train one model (GRU or MLP) per target")
+    t = sub.add_parser("train", help="cross-validate and train one MLP per target")
     t.add_argument("--data-dir", required=True, help="folder holding per-application sub-folders")
     t.add_argument("--out-dir", default="models")
-    t.add_argument("--model", choices=tuple(MODELS), default="gru",
-                   help="gru = recurrent over the observations, mlp = feed-forward DNN on the mean of "
-                        "per-observation encodings (use --max-len 1 for one observation per sample)")
     t.add_argument("--targets", nargs="+", choices=TARGETS, default=list(TARGETS))
     t.add_argument("--features", default=",".join(DEFAULT_FEATURES),
                    help="comma-separated metric columns of all_configs.csv used as model input")
@@ -934,14 +921,18 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--cv-mode", choices=("app", "region", "none"), default="app",
                    help="app = leave-one-application-out, region = 5-fold by region")
     t.add_argument("--cv-only", action="store_true", help="run cross-validation but do not save final models")
-    t.add_argument("--eval-draws", type=int, default=32, help="random observation subsets per test region")
-    t.add_argument("--max-len", type=int, default=8, help="max observations per sequence")
+    t.add_argument("--eval-draws", type=int, default=32,
+                   help="random single observations tried per test region (scores are averaged)")
+    t.add_argument("--default-chunk", type=int, default=256,
+                   help="chunk size of the default configuration used as the cross-validation baseline "
+                        "(max threads, static, max frequency); the closest swept chunk is used")
+    t.add_argument("--max-len", type=int, default=8,
+                   help="max observations per sample (1 = a plain MLP on one observation)")
     t.add_argument("--hidden", type=int, default=64)
-    t.add_argument("--layers", type=int, default=None,
-                   help="recurrent layers (gru, default 1) or dense layers (mlp, default 3)")
+    t.add_argument("--layers", type=int, default=3, help="dense layers of the observation encoder")
     t.add_argument("--dropout", type=float, default=0.2)
     t.add_argument("--epochs", type=int, default=40)
-    t.add_argument("--samples-per-region", type=int, default=64, help="sequences drawn per region per epoch")
+    t.add_argument("--samples-per-region", type=int, default=64, help="samples drawn per region per epoch")
     t.add_argument("--batch-size", type=int, default=128)
     t.add_argument("--lr", type=float, default=2e-3)
     t.add_argument("--weight-decay", type=float, default=1e-2)

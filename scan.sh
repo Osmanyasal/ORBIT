@@ -108,6 +108,7 @@ echo "Chunks         : ${CHUNKS[*]}"
 echo "Frequencies    : ${FREQUENCIES[*]:-default}"
 # With a single thread the schedule and chunk have no effect, so it runs only once per frequency
 # (with the first schedule and chunk).
+exit 0
 TOTAL_RUNS=0
 for threads in "${THREADS[@]}"; do
     if [[ "${threads}" == "1" ]]; then

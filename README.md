@@ -88,7 +88,7 @@ LD_PRELOAD="$PWD/bin/Release/liborbit.so" ./your_application
 |----------|-------------|
 | `ORBIT_OPTIMIZED_CONF` | Path to the configuration file (`best_per_region.json`). If set and the file exists, ORBIT runs in Optimize mode; otherwise in Snapshot mode. |
 | `ORBIT_OPTIMIZE_POLICY` | Which evaluated candidate is applied to each region: `edp` (default; `best_edp` is accepted as an alias) applies the lowest-EDP settings, `fastest` applies the lowest-time settings. If the preferred candidate is missing for a region, the other one is used. |
-| `ORBIT_TIME_THRESHOLD` | Minimum total execution time of a region (`total_time_s`) for it to be tuned. Accepts `100ms`, `0.1s` or a plain number (values >= 10 are milliseconds, smaller values seconds). Default `100ms`; `0` tunes every region. |
+| `ORBIT_TIME_THRESHOLD` | Minimum total execution time of a region (`total_time_s`) for it to be tuned. Accepts `50ms`, `0.05s` or a plain number (values >= 10 are milliseconds, smaller values seconds). Default `50ms`; `0` tunes every region. |
 
 The file is read into `Region::fastest` and `Region::best_edp` (with `calls` and `configs_evaluated`);
 the chosen candidate is then copied into `Region::current` when the region starts, before `region_begin` runs.
@@ -255,9 +255,9 @@ python3 tools/best_settings.py runs/bt.C.x
 python3 tools/plot_heatmaps.py best_settings_bt.C.x
 ```
 
-## Configuration Predictor (GRU / MLP) 🧠
+## Configuration Predictor (MLP) 🧠
 
-`tools/train_gru.py` trains two models (`fastest` and `best_edp`) on the `all_configs.csv` / `best_per_region.json` pairs written by `tools/best_settings.py`. From the PMU and energy metrics of a single snapshot execution (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio, time_s, power_w), the models predict `threads`, `sched`, `chunk` and `frequency` per region, and `generate` writes them as a `best_per_region.json`-style file for Optimize mode.
+`tools/train_model.py` trains two MLPs (`fastest` and `best_edp`) on the `all_configs.csv` / `best_per_region.json` pairs written by `tools/best_settings.py`. From the PMU and energy metrics of a single snapshot execution (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio), the models predict `threads`, `sched`, `chunk` and `frequency` per region, and `generate` writes them as a `best_per_region.json`-style file for Optimize mode. No time series is needed.
 
 Requires `numpy`, `pandas` and `torch`.
 
@@ -265,10 +265,10 @@ Requires `numpy`, `pandas` and `torch`.
 cd tools
 
 # 1. Train on every <data_dir>/**/ folder holding all_configs.csv + best_per_region.json
-python3 train_gru.py train --data-dir <data_dir> --out-dir models [--model gru|mlp]
+python3 train_model.py train --data-dir <data_dir> --out-dir models
 
 # 2. Run the application once in Snapshot mode (ORBIT_OPTIMIZED_CONF unset), then predict from that execution folder
-python3 train_gru.py generate --model-dir models --snapshots <execution_folder> --output predicted_best_per_region.json
+python3 train_model.py generate --model-dir models --snapshots <execution_folder> --output predicted_best_per_region.json
 
 # 3. Apply the prediction
 ORBIT_OPTIMIZED_CONF=predicted_best_per_region.json ORBIT_OPTIMIZE_POLICY=edp \
@@ -277,25 +277,20 @@ LD_PRELOAD="$PWD/../bin/Release/liborbit.so" ./your_application
 
 | Command | Description |
 |---------|-------------|
-| `train` | Leave-one-application-out cross-validation, then trains and saves `model_fastest.pt`, `model_best_edp.pt` and `cv_metrics.json` in `--out-dir`. `--model` selects the network, `--cv-mode none` skips validation, `--targets` trains one model, `--features` selects the metrics. |
+| `train` | Leave-one-application-out cross-validation, then trains and saves `model_fastest.pt`, `model_best_edp.pt` and `cv_metrics.json` in `--out-dir`. The per-application geometric-mean extra cost of the predictor, the default and the global fixed configuration is printed and saved as `cv_per_app_<target>.csv` in `--out-dir`. `--max-len` sets the maximum number of observations per sample, `--layers` the number of dense layers, `--cv-mode none` skips validation, `--targets` trains one model, `--features` selects the metrics. |
 | `generate` | Reads snapshot execution folder(s) (`--snapshots`, a folder with `snapshot.conf` or a folder of them) and writes the configuration file. Each region needs both its `*__cpu_pmu.json` and `*__cpu_energy.json`. |
 | `predict` | Prints or saves recommendations from any CSV in the `all_configs.csv` format (`--input`, `--output`). |
 
-Models (`train --model`):
+Model: a feed-forward MLP (`--layers` dense layers, default 3). The same dense stack encodes every observation (up to `--max-len` per region, in random order), the encodings are averaged, and linear heads predict the four settings. `--max-len 1` makes it a plain MLP on one observation, which is what one snapshot execution gives.
 
-| Model | Description |
-|-------|-------------|
-| `gru` (default) | A GRU reads up to `--max-len` observations of a region and predicts the four settings. |
-| `mlp` | Feed-forward DNN (`--layers` dense layers, default 3): the same dense stack encodes every observation, the encodings are averaged, and linear heads predict the four settings. `--max-len 1` makes it a plain MLP on one observation. |
-
-The order of the observations carries no information, so both models reach similar accuracy: in leave-one-application-out validation (3 seeds) the extra time/EDP of the predicted config versus the optimum was within the seed-to-seed spread (about ±2–4 points) when a region has a single observation, which is what one snapshot execution gives. With 8 observations per region the MLP was slightly better and more stable for `best_edp`. Checkpoints record their model type, so `predict` and `generate` work with either.
+Because the encodings are averaged, the order of the observations carries no information. Checkpoints from the removed GRU model are rejected; retrain them.
 
 Notes:
 
-- `generate` writes `fastest` and `best_edp` for each region; `ORBIT_OPTIMIZE_POLICY` picks one. The `total_time_s` it contains is `calls` × the best per-call time measured in the snapshot (used for `ORBIT_TIME_THRESHOLD`), not a prediction.
+- `generate` writes `fastest` and `best_edp` for each region; `ORBIT_OPTIMIZE_POLICY` picks one. The region-level `total_time_s` (right after `calls`) is `calls` × the best per-call time measured in the snapshot (used for `ORBIT_TIME_THRESHOLD`), not a prediction. ORBIT also still accepts a `total_time_s` inside `fastest` / `best_edp`, as written by `best_settings.py`.
 - **Portable settings.** `threads`, `chunk` and `frequency` are predicted as positions on a normalised axis (threads as a fraction of the machine's cores, chunk on a log2 axis up to the largest trained chunk, frequency as a fraction of the machine's frequency range), over fixed bins (`--thread-bins`, `--freq-bins`). The most likely bin (`--readout argmax`, default; `median`/`mean` interpolate between bins, which did not help in cross-validation) is converted with the **target machine's** core count and frequency range and snapped to the nearest valid setting. Because the bins are finer than the swept steps, the model can pick settings that were not in the training sweep (e.g. 2.3 GHz when only 2.2 and 2.4 GHz were measured, or 24 threads) and can be used on a machine with a different core count or frequency range. `sched` stays a plain classification over the schedules seen in training. Checkpoints trained before this change are rejected; retrain them.
 - The target machine used by `generate` / `predict` defaults to what `scan.sh` sweeps on the current machine (`nproc` threads, the cpufreq range in 200 MHz steps). When predicting for another machine, or where cpufreq is unavailable, give it with `--max-threads`, `--freq-range MIN_KHZ MAX_KHZ` and `--freq-step`.
-- The model input still contains absolute `time_s` and `power_w`, which depend on the hardware; restrict `--features` to machine-independent metrics (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio) if the training and target machines differ a lot.
+- The default model input contains only machine-independent metrics (ipc, l2_hit_ratio, l3_mpki, branch_mispr_ratio). Absolute metrics such as `time_s` and `power_w` can be added with `--features`, but they depend on the hardware.
 - Each training application is normalised with the settings its own sweep covered, so applications swept on different machines can share one `--data-dir`.
-- Validation on unseen applications shows predictions better than a single fixed configuration (clearly for `best_edp`, only slightly for `fastest`), but still above the optimum (see `models/cv_metrics.json`). More training applications are the most likely way to improve it.
+- Validation on unseen applications (leave-one-application-out, one observation per region) compares the predicted configuration with the best configuration of each region and with the untuned default (max threads, static, max frequency, chunk `--default-chunk`, 256 by default; the sweep has no unchunked `static`). The prediction is clearly closer to the optimum than the default; see the printed report and `models/cv_metrics.json`. More training applications are the most likely way to improve it.
 

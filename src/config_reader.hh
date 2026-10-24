@@ -86,6 +86,17 @@ namespace orbit
             if (!has_fastest && !has_edp)
                 r.fastest = r.best_edp = parse_region_config(j); // flat configuration object
 
+            // A region-level total_time_s (written by orbit-predictor.py) applies to every candidate
+            // that does not carry its own.
+            const double region_total_time_s = utils::get_json_double(j, "total_time_s", 0.0);
+            if (region_total_time_s > 0.0)
+            {
+                if (has_fastest && r.fastest.total_time_s <= 0.0)
+                    r.fastest.total_time_s = region_total_time_s;
+                if (has_edp && r.best_edp.total_time_s <= 0.0)
+                    r.best_edp.total_time_s = region_total_time_s;
+            }
+
             return r;
         }
 
@@ -255,9 +266,9 @@ namespace orbit
 
     // Reads region configurations from file. Only the evaluated candidates (fastest, best_edp) are
     // filled in; Region::current is left empty and chosen later with Region::take_tuning.
-    // min_execution_time_s: minimum execution time in seconds (default: 0.1s = 100ms; set <= 0 to disable).
-    // Can also be configured via ORBIT_TIME_THRESHOLD (e.g. "100ms", "0.1s").
-    inline RegionConfigs read_region_configs(const std::string &filepath, double min_execution_time_s = 0.1)
+    // min_execution_time_s: minimum execution time in seconds (default: 0.05s = 50ms; set <= 0 to disable).
+    // Can also be configured via ORBIT_TIME_THRESHOLD (e.g. "50ms", "0.05s").
+    inline RegionConfigs read_region_configs(const std::string &filepath, double min_execution_time_s = 0.05)
     {
         RegionConfigs configs;
         std::ifstream in(filepath);
