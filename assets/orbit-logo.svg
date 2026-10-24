@@ -49,7 +49,8 @@
   <g transform="translate(-254.65 -691.1) scale(1.65)">
     <g fill="none" stroke="#14263D" stroke-width="12" stroke-linecap="square" stroke-linejoin="round" aria-hidden="true">
       <rect x="477" y="505" width="61" height="76" rx="27"/>
-      <path d="M578 581V505H610C643 505 643 545 610 545H578M610 545L639 581"/>
+      <path d="M578 581V505H610C643 505 643 545 610 545H578"/>
+      <path d="M602 545H617L651 587H636Z" fill="#14263D" stroke="none"/>
       <path d="M681 543H712C742 543 742 581 712 581H681V505H710C738 505 738 543 710 543"/>
       <path d="M783 505V581"/>
       <path d="M829 505H897M863 505V581"/>
