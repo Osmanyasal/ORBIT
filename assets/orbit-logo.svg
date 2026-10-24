@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1408" height="512" viewBox="0 0 1408 512" role="img" aria-labelledby="title description">
+  <title id="title">ORBIT</title>
+  <desc id="description">Interwoven teal orbital threads and satellite nodes surround a midnight-blue parallel-computing core, beside a geometric ORBIT wordmark and tagline on white.</desc>
+  <defs>
+    <linearGradient id="thread" x1="-200" y1="-90" x2="200" y2="90" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#087F8C"/>
+      <stop offset=".5" stop-color="#10AFA7"/>
+      <stop offset="1" stop-color="#55D6BE"/>
+    </linearGradient>
+    <linearGradient id="core" x1="-35" y1="-40" x2="35" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#243B55"/>
+      <stop offset="1" stop-color="#101D32"/>
+    </linearGradient>
+  </defs>
+  <path fill="#FFFFFF" d="M0 0h1408v512H0z"/>
+  <g transform="translate(430 249) scale(.47)">
+    <g fill="none" stroke-linecap="round">
+      <ellipse rx="106" ry="162" transform="rotate(-36)" stroke="#DCE8EC" stroke-width="2"/>
+      <g transform="rotate(-26)" stroke="url(#thread)">
+        <ellipse rx="206" ry="75" stroke-width="5"/>
+        <ellipse rx="206" ry="90" stroke-width="6"/>
+        <ellipse rx="206" ry="105" stroke-width="5"/>
+      </g>
+      <path d="M-148-117C-103-157-22-109 48-34S148 117 104 143" stroke="#FFFFFF" stroke-width="10"/>
+      <path d="M-148-117C-103-157-22-109 48-34S148 117 104 143" stroke="#263E56" stroke-width="3"/>
+    </g>
+    <circle r="47" fill="#FFFFFF"/>
+    <circle r="40" fill="url(#core)"/>
+    <g fill="none" stroke-linecap="round" stroke-width="5">
+      <path d="M-19-13H9" stroke="#55D6BE"/>
+      <path d="M-9 0H19" stroke="#FFFFFF"/>
+      <path d="M-19 13H9" stroke="#55D6BE"/>
+    </g>
+    <g fill="#55D6BE">
+      <circle cx="18" cy="-13" r="3"/>
+      <circle cx="-18" cy="0" r="3" fill="#FFFFFF"/>
+      <circle cx="18" cy="13" r="3"/>
+    </g>
+    <g transform="rotate(-26)">
+      <circle cx="206" r="13" fill="#FFFFFF"/>
+      <circle cx="206" r="8" fill="#0C9E9A"/>
+      <circle cx="-178" cy="45" r="11" fill="#FFFFFF"/>
+      <circle cx="-178" cy="45" r="6" fill="#087F8C"/>
+    </g>
+    <circle cx="-148" cy="-117" r="10" fill="#FFFFFF"/>
+    <circle cx="-148" cy="-117" r="6" fill="#F29C59"/>
+    <circle cx="104" cy="143" r="5" fill="#263E56"/>
+  </g>
+  <g transform="translate(123 -318)">
+    <g fill="none" stroke="#14263D" stroke-width="12" stroke-linecap="square" stroke-linejoin="round" aria-hidden="true">
+      <rect x="477" y="505" width="61" height="76" rx="27"/>
+      <path d="M578 581V505H610C643 505 643 545 610 545H578M610 545L639 581"/>
+      <path d="M681 543H712C742 543 742 581 712 581H681V505H710C738 505 738 543 710 543"/>
+      <path d="M783 505V581"/>
+      <path d="M829 505H897M863 505V581"/>
+    </g>
+    <path d="M925 570h11v11h-11z" fill="#0C9E9A"/>
+    <text x="704" y="635" fill="#5A6B7D" font-family="Arial, Helvetica, sans-serif" font-size="16" letter-spacing="2.2" text-anchor="middle">OpenMP Runtime Backend for Intelligent Tuning</text>
+  </g>
+</svg>
